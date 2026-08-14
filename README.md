@@ -1,6 +1,6 @@
 # The Assistant
 
-Local-first personal assistant project designed to integrate into the OBEOS ecosystem.
+A local-first, modular AI assistant platform built around Claude Code, Obsidian graph memory, interchangeable Markdown skills, private on-device voice, and a real-time operator HUD—designed to integrate into the OBEOS ecosystem.
 
 ## Architecture
 
@@ -20,7 +20,9 @@ Operating loop:
 ```text
 The-Assistant/
 ├── hud/
-│   └── index.html
+│   ├── index.html
+│   ├── style.css
+│   └── app.js
 ├── skills/
 │   ├── assistant_core.md
 │   ├── metrics.md
