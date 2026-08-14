@@ -1,0 +1,32 @@
+# Secrets
+.env
+.env.*
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Node
+node_modules/
+dist/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Obsidian machine-local UI state
+vault/.obsidian/workspace.json
+vault/.obsidian/workspace-mobile.json
+
+# Local audio / model artifacts
+*.wav
+*.mp3
+*.flac
+models/
+cache/
