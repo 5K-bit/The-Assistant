@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>The Assistant — HUD</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div class="shell">
+  <header>
+    <div class="brand">
+      <div class="brand-mark">A</div>
+      <div>
+        <h1>THE ASSISTANT</h1>
+        <small>OBEOS // local operator interface</small>
+      </div>
+    </div>
+    <div class="top-status">
+      <span class="badge"><span class="pulse"></span>LOCAL</span>
+      <span class="badge ok">VAULT MOUNTED</span>
+      <span class="badge">CLAUDE CODE: READY</span>
+      <span class="badge" id="clock">--:--:--</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel" id="vitals">
+      <div class="panel-title"><span>System Vitals</span><span>LIVE</span></div>
+      <div class="panel-body">
+        <div class="section-label">Compute</div>
+        <div class="metric">
+          <div class="metric-head"><span>CPU</span><span id="cpuText">18%</span></div>
+          <div class="bar"><div class="fill" id="cpuBar" style="width:18%"></div></div>
+        </div>
+        <div class="metric">
+          <div class="metric-head"><span>MEMORY</span><span id="ramText">41%</span></div>
+          <div class="bar"><div class="fill" id="ramBar" style="width:41%"></div></div>
+        </div>
+        <div class="metric">
+          <div class="metric-head"><span>DISK</span><span id="diskText">63%</span></div>
+          <div class="bar"><div class="fill amber" id="diskBar" style="width:63%"></div></div>
+        </div>
+
+        <div class="mini-grid">
+          <div class="mini-card"><span>Uptime</span><b id="uptime">07:42</b></div>
+          <div class="mini-card"><span>Vault</span><b>1.8 GB</b></div>
+          <div class="mini-card"><span>Notes</span><b>842</b></div>
+          <div class="mini-card"><span>Links</span><b>3,416</b></div>
+        </div>
+
+        <div class="section-label">Runtime</div>
+        <div class="service"><span><i class="dot"></i>Claude Code</span><span class="ok">READY</span></div>
+        <div class="service"><span><i class="dot"></i>Obsidian Vault</span><span class="ok">RW</span></div>
+        <div class="service"><span><i class="dot"></i>Local STT</span><span class="ok">ARMED</span></div>
+        <div class="service"><span><i class="dot"></i>Local TTS</span><span class="ok">READY</span></div>
+        <div class="service"><span><i class="dot warn"></i>OBEOS Link</span><span class="warn">STANDBY</span></div>
+
+        <div class="section-label">Brain Skills</div>
+        <div class="service"><span>metrics.md</span><span class="ok">✓</span></div>
+        <div class="service"><span>inbox.md</span><span class="ok">✓</span></div>
+        <div class="service"><span>trends.md</span><span class="ok">✓</span></div>
+        <div class="service"><span>plan.md</span><span class="ok">✓</span></div>
+        <div class="service"><span>vault.md</span><span class="ok">✓</span></div>
+      </div>
+    </section>
+
+    <section class="panel" id="command">
+      <div class="panel-title"><span>Command Deck</span><span>Speak · Route · Remember · Repeat</span></div>
+      <div class="panel-body">
+        <div class="command-body">
+          <div class="command-deck">
+            <button class="cmd" data-command="plantoday">plantoday<span>top 7 priorities</span></button>
+            <button class="cmd" data-command="whatsnew">whatsnew<span>trends + changes</span></button>
+            <button class="cmd" data-command="wkreview">wkreview<span>weekly review</span></button>
+            <button class="cmd" data-command="dayreview">dayreview<span>review today</span></button>
+            <button class="cmd" data-command="plantmrw">plantmrw<span>prepare tomorrow</span></button>
+            <button class="cmd" data-command="listcommands">listcommands<span>command index</span></button>
+            <button class="cmd" data-command="vaultclean">vaultclean<span>distill /raw → /wiki</span></button>
+            <button class="cmd" data-command="metrics">metrics<span>pull current numbers</span></button>
+          </div>
+
+          <div class="terminal" id="terminal">
+            <div class="line"><span class="time">[11:18:01]</span> <span class="sys">SYS</span> boot sequence complete.</div>
+            <div class="line"><span class="time">[11:18:02]</span> <span class="sys">SYS</span> vault mounted: <span class="dim">/raw /wiki /output</span></div>
+            <div class="line"><span class="time">[11:18:03]</span> <span class="sys">SYS</span> 5 skills indexed. No database attached.</div>
+            <div class="line"><span class="time">[11:18:04]</span> <span class="assistant">ASSISTANT</span> ready.</div>
+            <div class="line"><span class="time">[11:18:04]</span> <span class="dim">Hold SPACE to speak or enter a command.</span></div>
+          </div>
+
+          <form class="prompt-row" id="promptForm">
+            <span class="ok">›</span>
+            <input id="promptInput" autocomplete="off" spellcheck="false" placeholder="command or natural language…" />
+            <button type="submit" class="send">RUN</button>
+          </form>
+        </div>
+      </div>
+    </section>
+
+    <section id="rightstack">
+      <section class="panel">
+        <div class="panel-title"><span>Schedule</span><span id="dateLabel">FRI 14 AUG</span></div>
+        <div class="panel-body">
+          <div class="schedule-item">
+            <div class="schedule-time">07:00</div>
+            <div class="schedule-text">Morning brief<small>inbox.md → /output</small></div>
+          </div>
+          <div class="schedule-item">
+            <div class="schedule-time">09:00</div>
+            <div class="schedule-text">Metrics pull<small>metrics.md → numbers snapshot</small></div>
+          </div>
+          <div class="schedule-item">
+            <div class="schedule-time">12:30</div>
+            <div class="schedule-text">Trend scan<small>trends.md → /raw</small></div>
+          </div>
+          <div class="schedule-item">
+            <div class="schedule-time">18:00</div>
+            <div class="schedule-text">Day review<small>dayreview → /output</small></div>
+          </div>
+          <div class="schedule-item">
+            <div class="schedule-time">22:30</div>
+            <div class="schedule-text">Plan tomorrow<small>plantmrw → linked daily note</small></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title"><span>Audio I/O</span><span id="audioState" class="ok">IDLE</span></div>
+        <div class="panel-body">
+          <div class="audio-grid">
+            <div class="audio-card">
+              <div class="section-label" style="margin-top:0">Input / STT</div>
+              <div class="big">LOCAL MIC</div>
+              <div class="level" id="micLevel"></div>
+            </div>
+            <div class="audio-card">
+              <div class="section-label" style="margin-top:0">Output / TTS</div>
+              <div class="big">LOCAL VOICE</div>
+              <div class="level" id="ttsLevel"></div>
+            </div>
+          </div>
+          <div class="ptt" id="ptt">HOLD SPACE // PUSH TO TALK</div>
+          <div class="section-label">Privacy</div>
+          <div class="service" style="padding-top:0"><span>Audio route</span><span class="ok">ON-DEVICE</span></div>
+          <div class="service"><span>Network audio</span><span class="ok">BLOCKED</span></div>
+        </div>
+      </section>
+    </section>
+
+    <section class="panel" id="vault">
+      <div class="panel-title"><span>Vault Intelligence</span><span>IF IT ISN'T IN THE VAULT, IT DIDN'T HAPPEN</span></div>
+      <div class="panel-body">
+        <div class="vault-wrap">
+          <div class="vault-stat">
+            <div><div class="num">842</div><div class="lab">notes</div></div>
+            <div><div class="num">3.4K</div><div class="lab">links</div></div>
+            <div><div class="num">127</div><div class="lab">raw</div></div>
+            <div><div class="num">388</div><div class="lab">wiki</div></div>
+            <div><div class="num">327</div><div class="lab">output</div></div>
+            <div><div class="num">5</div><div class="lab">skills</div></div>
+          </div>
+
+          <div class="feed" id="vaultFeed">
+            <div class="feed-row"><span class="time">11:12:04</span><span class="type">WRITE</span><span class="path">/output/2026-08-14-morning-brief.md</span></div>
+            <div class="feed-row"><span class="time">10:49:17</span><span class="type">LINK</span><span class="path">/wiki/OBEOS.md ↔ /wiki/The Assistant.md</span></div>
+            <div class="feed-row"><span class="time">10:42:06</span><span class="type">DISTILL</span><span class="path">/raw/claude-notes.md → /wiki/assistant-brain.md</span></div>
+            <div class="feed-row"><span class="time">10:31:55</span><span class="type">WRITE</span><span class="path">/output/today-top-7.md</span></div>
+            <div class="feed-row"><span class="time">10:18:11</span><span class="type">READ</span><span class="path">/wiki/projects/obeos-cloud.md</span></div>
+          </div>
+
+          <div class="graph">
+            <div class="graph-title">LIVE LINK GRAPH // RECENT NEIGHBORHOOD</div>
+            <svg viewBox="0 0 330 170" aria-label="Vault graph visualization">
+              <line class="edge" x1="70" y1="75" x2="155" y2="40"/>
+              <line class="edge" x1="70" y1="75" x2="150" y2="102"/>
+              <line class="edge" x1="155" y1="40" x2="255" y2="58"/>
+              <line class="edge" x1="150" y1="102" x2="255" y2="58"/>
+              <line class="edge" x1="150" y1="102" x2="260" y2="130"/>
+              <line class="edge" x1="70" y1="75" x2="56" y2="137"/>
+              <line class="edge" x1="56" y1="137" x2="150" y2="102"/>
+              <circle class="node" cx="70" cy="75" r="9"/>
+              <circle class="node" cx="155" cy="40" r="7"/>
+              <circle class="node raw" cx="150" cy="102" r="7"/>
+              <circle class="node output" cx="255" cy="58" r="8"/>
+              <circle class="node" cx="260" cy="130" r="7"/>
+              <circle class="node raw" cx="56" cy="137" r="6"/>
+              <text class="graph-label" x="83" y="76">The Assistant</text>
+              <text class="graph-label" x="166" y="42">OBEOS</text>
+              <text class="graph-label" x="160" y="105">brain.md</text>
+              <text class="graph-label" x="266" y="60">today.md</text>
+              <text class="graph-label" x="270" y="133">voice.md</text>
+              <text class="graph-label" x="17" y="152">/raw</text>
+            </svg>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span>THE ASSISTANT // HUD v0.1</span>
+    <span id="footerStatus">API: FALLBACK MODE · VAULT: LOCAL · DB: NONE</span>
+  </footer>
+</div>
+<div class="scanline"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
