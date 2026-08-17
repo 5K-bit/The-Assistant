@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "name": "the-assistant",
+  "component_type": "hud",
+  "version": "0.1.0",
+  "entrypoint": "hud",
+  "interfaces": ["hud", "skills", "vault"],
+  "capabilities": ["operator-hud", "skill-loading", "vault-memory"],
+  "lifecycle": "operator-managed",
+  "health": {"path": "/api/health", "default_url": "http://127.0.0.1:7777/api/health"},
+  "dependencies": ["ollama"],
+  "source_repository": "5K-bit/The-Assistant"
+}
