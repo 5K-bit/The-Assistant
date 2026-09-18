@@ -1,0 +1,25 @@
+{
+  "engine": {
+    "name": "OpenCode",
+    "runtime": "Ollama",
+    "adapters": ["OpenCode", "Claude Code"]
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 7777,
+    "serve_hud": true,
+    "allow_origins": []
+  },
+  "paths": {
+    "vault": "vault",
+    "skills": "skills",
+    "hud": "hud"
+  },
+  "schedule": [
+    {"time": "07:00", "title": "Morning brief", "detail": "inbox.md → /output"},
+    {"time": "09:00", "title": "Metrics pull", "detail": "metrics.md → numbers snapshot"},
+    {"time": "12:30", "title": "Trend scan", "detail": "trends.md → /raw"},
+    {"time": "18:00", "title": "Day review", "detail": "dayreview → /output"},
+    {"time": "22:30", "title": "Plan tomorrow", "detail": "plantmrw → linked daily note"}
+  ]
+}
