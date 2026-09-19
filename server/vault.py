@@ -86,7 +86,9 @@ def graph(vault_dir, limit=7):
             degree[stem] = degree.get(stem, 0) + 1
             degree[target] = degree.get(target, 0) + 1
 
-    if not degree:
+    # No links at all means there is no neighbourhood to draw. Guarding on
+    # `degree` alone would pass here, since every note gets a zero entry.
+    if not edges:
         return {"nodes": [], "edges": []}
 
     center = max(degree, key=lambda node: (degree[node], node))

@@ -109,6 +109,17 @@ The server binds to `127.0.0.1` and sends **no** CORS headers unless an
 origin is listed in `config.json`. Opening the HUD from the server URL
 keeps it same-origin, so nothing needs to be granted for normal use.
 
+## Tests
+
+```sh
+python3 -m unittest discover -s tests -v
+```
+
+61 tests over the skill parser, vault reader, vitals probes, config
+resolution and the HTTP surface — including path-traversal attempts, the
+CORS policy, oversized and malformed request bodies, and degraded health.
+Standard library only, like the server itself.
+
 ## HUD
 
 `hud/index.html` is the v0.1 single-screen terminal HUD: system vitals,

@@ -278,6 +278,11 @@ function blankPanels(){
   ["uptime","vaultSize","vaultNotes","vaultLinks",
    "statNotes","statLinks","statRaw","statWiki","statOutput","statSkills"]
     .forEach(id => { $(id).textContent = UNKNOWN; });
+  // The engine name comes from the API too, so it is unknown while the
+  // backend is unreachable — showing the last value would imply it was
+  // still confirmed.
+  $("engineBadge").textContent = `ENGINE: ${UNKNOWN}`;
+  $("engineBadge").title = "";
   $("skillCount").textContent = UNKNOWN;
   clear($("skillList"));
   clear($("runtimeList"));
