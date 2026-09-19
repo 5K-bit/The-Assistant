@@ -105,6 +105,18 @@ ASSISTANT_ENGINE="Claude Code" ASSISTANT_PORT=7788 python3 -m server
 `ASSISTANT_ENGINE`, `ASSISTANT_RUNTIME`, `ASSISTANT_HOST`, `ASSISTANT_PORT`,
 `ASSISTANT_VAULT` and `ASSISTANT_SKILLS` are recognised.
 
+To run against a real Obsidian vault instead of the one in this repo,
+point `paths.vault` in `config.json` at it, or pass it per-run:
+
+```sh
+ASSISTANT_VAULT=~/Obsidian/MyVault python3 -m server
+```
+
+Vault and skills paths may be absolute or `~`-relative; a bare relative
+path is resolved against the repository root. The vault is expected to
+contain `raw/`, `wiki/` and `output/`; `/api/health` reports `degraded`
+with HTTP 503 if the directory is missing.
+
 The server binds to `127.0.0.1` and sends **no** CORS headers unless an
 origin is listed in `config.json`. Opening the HUD from the server URL
 keeps it same-origin, so nothing needs to be granted for normal use.

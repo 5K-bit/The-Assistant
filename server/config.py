@@ -69,5 +69,10 @@ def load():
             # defaults and say so rather than silently pretending it loaded.
             print(f"[config] ignoring {CONFIG_PATH.name}: {exc}")
     cfg = _from_env(cfg)
-    cfg["paths"] = {k: (ROOT / v).resolve() for k, v in cfg["paths"].items()}
+    # Expand `~` before joining: a bare `ROOT / "~/vault"` would resolve to a
+    # literal "~" directory inside the repo rather than the user's home.
+    # Absolute paths replace ROOT, relative ones stay repo-relative.
+    cfg["paths"] = {
+        k: (ROOT / Path(v).expanduser()).resolve() for k, v in cfg["paths"].items()
+    }
     return cfg

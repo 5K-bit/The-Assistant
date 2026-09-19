@@ -293,6 +293,35 @@ class TestConfig(unittest.TestCase):
             finally:
                 config.CONFIG_PATH = original
 
+    def test_tilde_in_path_expands_to_home(self):
+        import os
+        old = os.environ.get("ASSISTANT_VAULT")
+        os.environ["ASSISTANT_VAULT"] = "~/SomeVault"
+        try:
+            resolved = str(config.load()["paths"]["vault"])
+            self.assertNotIn("~", resolved)
+            self.assertTrue(resolved.startswith(str(Path.home())), resolved)
+        finally:
+            if old is None:
+                os.environ.pop("ASSISTANT_VAULT", None)
+            else:
+                os.environ["ASSISTANT_VAULT"] = old
+
+    def test_absolute_path_replaces_repo_root(self):
+        import os
+        old = os.environ.get("ASSISTANT_VAULT")
+        os.environ["ASSISTANT_VAULT"] = "/tmp/elsewhere/vault"
+        try:
+            self.assertEqual(str(config.load()["paths"]["vault"]), "/tmp/elsewhere/vault")
+        finally:
+            if old is None:
+                os.environ.pop("ASSISTANT_VAULT", None)
+            else:
+                os.environ["ASSISTANT_VAULT"] = old
+
+    def test_relative_path_stays_repo_relative(self):
+        self.assertEqual(config.load()["paths"]["vault"], (REPO / "vault").resolve())
+
     def test_merge_is_deep(self):
         merged = config._merge({"a": {"x": 1, "y": 2}}, {"a": {"y": 9}})
         self.assertEqual(merged["a"], {"x": 1, "y": 9})
