@@ -228,6 +228,7 @@
     display:grid;grid-template-columns:75px 90px 1fr;gap:7px;
     padding:6px 4px;border-bottom:1px dotted #142c1d;font-size:9px;align-items:start;
   }
+  .feed-row.empty{grid-template-columns:1fr;color:var(--muted)}
   .feed-row .type{color:var(--cyan)}
   .feed-row .path{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .graph{

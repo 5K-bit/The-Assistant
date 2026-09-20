@@ -1,0 +1,12 @@
+{
+  "name": "the-assistant-ui-tests",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Browser tests for The Assistant HUD",
+  "scripts": {
+    "test": "node hud.test.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.50.0"
+  }
+}
