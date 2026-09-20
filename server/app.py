@@ -11,16 +11,40 @@ needed for normal use.
 
 import json
 import mimetypes
+import threading
+import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import config, skills, vault, vitals
+from . import config, metrics, skills, vault_cache, vitals
 
 API_VERSION = "0.1.0"
 MAX_BODY_BYTES = 64 * 1024
 
 STARTED_AT = datetime.now(timezone.utc)
+
+# One prepared-state cache per vault path, shared by every request.
+_caches = {}
+_caches_lock = threading.Lock()
+
+
+def get_cache(cfg):
+    key = str(cfg["paths"]["vault"])
+    with _caches_lock:
+        cache = _caches.get(key)
+        if cache is None:
+            interval = cfg.get("vault", {}).get("refresh_seconds", 10)
+            cache = vault_cache.VaultCache(cfg["paths"]["vault"], interval).start()
+            _caches[key] = cache
+        return cache
+
+
+def stop_caches():
+    with _caches_lock:
+        for cache in _caches.values():
+            cache.stop()
+        _caches.clear()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -42,6 +66,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 
     def _send(self, status, body, content_type):
+        self._status = status
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
@@ -53,6 +78,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def _json(self, payload, status=200):
         self._send(status, json.dumps(payload).encode("utf-8"), "application/json; charset=utf-8")
+
+    def _timed(self, route, handler):
+        """Run a route handler, recording how long it took."""
+        self._status = None
+        start = time.perf_counter()
+        try:
+            return handler()
+        finally:
+            metrics.record(route, (time.perf_counter() - start) * 1000, self._status)
 
     # --- routing ------------------------------------------------------
 
@@ -74,14 +108,15 @@ class Handler(BaseHTTPRequestHandler):
             "/api/vault/stats": self.api_vault_stats,
             "/api/vault/activity": self.api_vault_activity,
             "/api/vault/graph": self.api_vault_graph,
+            "/api/metrics": self.api_metrics,
         }
         if path in routes:
-            return routes[path]()
+            return self._timed(path, routes[path])
         if path.startswith("/api/"):
-            return self._json({"error": "not found", "path": path}, 404)
+            return self._timed("api:unknown", lambda: self._json({"error": "not found", "path": path}, 404))
         if self.cfg["server"].get("serve_hud", True):
-            return self.serve_static(path)
-        return self._json({"error": "not found"}, 404)
+            return self._timed("static", lambda: self.serve_static(path))
+        return self._timed("unknown", lambda: self._json({"error": "not found"}, 404))
 
     def do_POST(self):
         path = self.path.split("?", 1)[0].rstrip("/")
@@ -97,7 +132,7 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length) or b"{}")
         except (json.JSONDecodeError, UnicodeDecodeError):
             return self._json({"error": "invalid json"}, 400)
-        return self.api_command(payload)
+        return self._timed("/api/command", lambda: self.api_command(payload))
 
     # --- static HUD ---------------------------------------------------
 
@@ -162,14 +197,36 @@ class Handler(BaseHTTPRequestHandler):
             }
         )
 
+    def _vault_snapshot(self):
+        return get_cache(self.cfg).snapshot() or {}
+
+    def _freshness(self, snapshot):
+        """Age metadata travels with the data, so a stale number is visible."""
+        return {"built_at": snapshot.get("built_at"), "age_ms": snapshot.get("age_ms")}
+
     def api_vault_stats(self):
-        return self._json(vault.stats(self.cfg["paths"]["vault"]))
+        snapshot = self._vault_snapshot()
+        return self._json({**snapshot.get("stats", {}), **self._freshness(snapshot)})
 
     def api_vault_activity(self):
-        return self._json({"rows": vault.activity(self.cfg["paths"]["vault"])})
+        snapshot = self._vault_snapshot()
+        return self._json({"rows": snapshot.get("activity", []), **self._freshness(snapshot)})
 
     def api_vault_graph(self):
-        return self._json(vault.graph(self.cfg["paths"]["vault"]))
+        snapshot = self._vault_snapshot()
+        graph = snapshot.get("graph") or {"nodes": [], "edges": []}
+        return self._json({**graph, **self._freshness(snapshot)})
+
+    def api_metrics(self):
+        snapshot = self._vault_snapshot()
+        payload = metrics.snapshot()
+        payload["vault_cache"] = {
+            "refresh_seconds": self.cfg.get("vault", {}).get("refresh_seconds", 10),
+            "build_ms": snapshot.get("build_ms"),
+            "age_ms": snapshot.get("age_ms"),
+            "built_at": snapshot.get("built_at"),
+        }
+        return self._json(payload)
 
     def api_command(self, payload):
         raw = str(payload.get("command", "")).strip()
@@ -216,3 +273,4 @@ def serve():
         print("\nshutting down.")
     finally:
         httpd.server_close()
+        stop_caches()

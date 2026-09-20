@@ -25,6 +25,7 @@ DEFAULTS = {
         "allow_origins": [],
     },
     "paths": {"vault": "vault", "skills": "skills", "hud": "hud"},
+    "vault": {"refresh_seconds": 10},
     "schedule": [],
 }
 

@@ -2,6 +2,11 @@
 
 Everything here is measured from the Markdown on disk. An empty vault
 reports zeros; it never reports an estimate.
+
+`scan()` traverses the vault once and derives all three views from that
+single pass. The individual `stats`/`activity`/`graph` helpers remain for
+direct use, but the server reads through `vault_cache`, which keeps a
+prepared snapshot warm so a request never waits on a traversal.
 """
 
 import re
@@ -12,76 +17,88 @@ WIKILINK = re.compile(r"\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]")
 FOLDERS = ("raw", "wiki", "output")
 
 
-def _notes(vault_dir):
-    """Yield (folder, path) for every Markdown note in the vault."""
+def _collect(vault_dir):
+    """Walk the vault once, returning one record per Markdown note."""
+    vault_dir = Path(vault_dir)
+    records = []
     for folder in FOLDERS:
-        base = Path(vault_dir) / folder
+        base = vault_dir / folder
         if not base.is_dir():
             continue
         for path in base.rglob("*.md"):
-            if path.is_file():
-                yield folder, path
+            if not path.is_file():
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                text = None
+
+            stem = path.stem
+            raw_links = WIKILINK.findall(text) if text is not None else []
+            targets = []
+            for target in raw_links:
+                target = target.strip()
+                if target and target != stem:
+                    targets.append(target)
+
+            records.append(
+                {
+                    "folder": folder,
+                    "stem": stem,
+                    "rel": str(path.relative_to(vault_dir)).replace("\\", "/"),
+                    "mtime": stat.st_mtime,
+                    "size": stat.st_size if text is not None else 0,
+                    "link_count": len(raw_links),
+                    "targets": targets,
+                    "readable": text is not None,
+                }
+            )
+    return records
 
 
-def stats(vault_dir):
-    """Count notes per folder, total wikilinks, and bytes on disk."""
+def _stats_from(records):
     per_folder = {folder: 0 for folder in FOLDERS}
     links = 0
     size = 0
-    for folder, path in _notes(vault_dir):
-        per_folder[folder] += 1
-        try:
-            size += path.stat().st_size
-            links += len(WIKILINK.findall(path.read_text(encoding="utf-8", errors="replace")))
-        except OSError:
-            continue
-    return {
-        "notes": sum(per_folder.values()),
-        "links": links,
-        "bytes": size,
-        **per_folder,
-    }
+    for record in records:
+        per_folder[record["folder"]] += 1
+        if record["readable"]:
+            size += record["size"]
+            links += record["link_count"]
+    return {"notes": len(records), "links": links, "bytes": size, **per_folder}
 
 
-def activity(vault_dir, limit=8):
-    """Return the most recently modified notes, newest first.
+def _activity_from(records, limit):
+    """Most recently modified notes, newest first.
 
     The reported type is the vault folder the note lives in — an observed
     fact — rather than an inferred action such as DISTILL or LINK.
     """
-    rows = []
-    for folder, path in _notes(vault_dir):
-        try:
-            mtime = path.stat().st_mtime
-        except OSError:
-            continue
-        rows.append(
-            {
-                "time": datetime.fromtimestamp(mtime).strftime("%H:%M:%S"),
-                "type": folder.upper(),
-                "path": "/" + str(path.relative_to(vault_dir)).replace("\\", "/"),
-                "mtime": mtime,
-            }
-        )
+    rows = [
+        {
+            "time": datetime.fromtimestamp(record["mtime"]).strftime("%H:%M:%S"),
+            "type": record["folder"].upper(),
+            "path": "/" + record["rel"],
+            "mtime": record["mtime"],
+        }
+        for record in records
+    ]
     rows.sort(key=lambda row: row["mtime"], reverse=True)
     return rows[:limit]
 
 
-def graph(vault_dir, limit=7):
-    """Return the most-connected note and its immediate neighbourhood."""
+def _graph_from(records, limit):
+    """The most-connected note and its immediate neighbourhood."""
     folder_of, edges, degree = {}, set(), {}
-    for folder, path in _notes(vault_dir):
-        stem = path.stem
-        folder_of[stem] = folder
+    for record in records:
+        stem = record["stem"]
+        folder_of[stem] = record["folder"]
         degree.setdefault(stem, 0)
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        for target in WIKILINK.findall(text):
-            target = target.strip()
-            if not target or target == stem:
-                continue
+        for target in record["targets"]:
             edges.add(tuple(sorted((stem, target))))
             degree[stem] = degree.get(stem, 0) + 1
             degree[target] = degree.get(target, 0) + 1
@@ -105,3 +122,28 @@ def graph(vault_dir, limit=7):
             {"source": a, "target": b} for a, b in sorted(edges) if a in keep_set and b in keep_set
         ],
     }
+
+
+def scan(vault_dir, activity_limit=8, graph_limit=7):
+    """Traverse the vault once and derive every view the API serves."""
+    records = _collect(vault_dir)
+    return {
+        "stats": _stats_from(records),
+        "activity": _activity_from(records, activity_limit),
+        "graph": _graph_from(records, graph_limit),
+    }
+
+
+def stats(vault_dir):
+    """Count notes per folder, total wikilinks, and bytes on disk."""
+    return _stats_from(_collect(vault_dir))
+
+
+def activity(vault_dir, limit=8):
+    """Return the most recently modified notes, newest first."""
+    return _activity_from(_collect(vault_dir), limit)
+
+
+def graph(vault_dir, limit=7):
+    """Return the most-connected note and its immediate neighbourhood."""
+    return _graph_from(_collect(vault_dir), limit)

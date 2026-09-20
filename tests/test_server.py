@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -13,7 +14,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from server import app, config, skills, vault, vitals  # noqa: E402
+from server import app, config, metrics, skills, vault, vault_cache, vitals  # noqa: E402
 
 
 # ---------- helpers ----------
@@ -510,6 +511,149 @@ class TestHTTPVariants(unittest.TestCase):
             for t in threads: t.join(timeout=20)
             self.assertEqual(len(results), 20)
             self.assertTrue(all(r == 200 for r in results))
+
+
+# ---------- metrics (AO-0) ----------
+
+class TestMetrics(unittest.TestCase):
+    def setUp(self):
+        metrics.reset()
+
+    def tearDown(self):
+        metrics.reset()
+
+    def test_records_count_and_percentiles(self):
+        for value in range(1, 101):
+            metrics.record("/x", float(value))
+        route = metrics.snapshot()["routes"]["/x"]
+        self.assertEqual(route["count"], 100)
+        self.assertEqual(route["min_ms"], 1.0)
+        self.assertEqual(route["max_ms"], 100.0)
+        self.assertLessEqual(route["p50_ms"], route["p95_ms"])
+        self.assertLessEqual(route["p95_ms"], route["max_ms"])
+
+    def test_counts_errors_separately(self):
+        metrics.record("/y", 1.0, 200)
+        metrics.record("/y", 1.0, 404)
+        metrics.record("/y", 1.0, None)
+        route = metrics.snapshot()["routes"]["/y"]
+        self.assertEqual(route["count"], 3)
+        self.assertEqual(route["errors"], 2)
+
+    def test_samples_are_bounded(self):
+        for value in range(metrics.MAX_SAMPLES * 2):
+            metrics.record("/z", float(value))
+        self.assertEqual(metrics.snapshot()["routes"]["/z"]["count"], metrics.MAX_SAMPLES * 2)
+
+    def test_empty_snapshot(self):
+        self.assertEqual(metrics.snapshot()["routes"], {})
+
+
+# ---------- vault cache (AO-2) ----------
+
+class TestVaultCache(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.v = Path(self.tmp.name)
+        for f in ("raw", "wiki", "output"):
+            (self.v / f).mkdir()
+        write(self.v / "wiki" / "a.md", "[[b]]")
+        write(self.v / "wiki" / "b.md", "[[a]]")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_snapshot_matches_direct_scan(self):
+        cache = vault_cache.VaultCache(self.v, interval=60)
+        try:
+            snapshot = cache.snapshot()
+            self.assertEqual(snapshot["stats"], vault.stats(self.v))
+            self.assertEqual(snapshot["graph"], vault.graph(self.v))
+            self.assertEqual(
+                [r["path"] for r in snapshot["activity"]],
+                [r["path"] for r in vault.activity(self.v)],
+            )
+        finally:
+            cache.stop()
+
+    def test_snapshot_carries_age(self):
+        cache = vault_cache.VaultCache(self.v, interval=60)
+        try:
+            snapshot = cache.snapshot()
+            self.assertIsNotNone(snapshot["built_at"])
+            self.assertIsNotNone(snapshot["build_ms"])
+            self.assertGreaterEqual(snapshot["age_ms"], 0)
+        finally:
+            cache.stop()
+
+    def test_builds_on_demand_without_start(self):
+        cache = vault_cache.VaultCache(self.v, interval=60)
+        try:
+            self.assertEqual(cache.snapshot()["stats"]["notes"], 2)
+        finally:
+            cache.stop()
+
+    def test_refresh_picks_up_new_notes(self):
+        cache = vault_cache.VaultCache(self.v, interval=60)
+        try:
+            self.assertEqual(cache.snapshot()["stats"]["notes"], 2)
+            write(self.v / "raw" / "c.md", "new note")
+            cache.refresh()
+            self.assertEqual(cache.snapshot()["stats"]["notes"], 3)
+        finally:
+            cache.stop()
+
+    def test_background_thread_refreshes_and_stops(self):
+        cache = vault_cache.VaultCache(self.v, interval=1).start()
+        try:
+            write(self.v / "raw" / "later.md", "added after start")
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                if cache.snapshot()["stats"]["notes"] == 3:
+                    break
+                time.sleep(0.2)
+            self.assertEqual(cache.snapshot()["stats"]["notes"], 3)
+        finally:
+            cache.stop()
+        self.assertIsNone(cache._thread)
+
+    def test_interval_has_a_floor(self):
+        self.assertGreaterEqual(vault_cache.VaultCache(self.v, interval=0).interval, 1.0)
+
+    def test_missing_vault_yields_zeros(self):
+        cache = vault_cache.VaultCache(Path("/nonexistent/vault"), interval=60)
+        try:
+            self.assertEqual(cache.snapshot()["stats"]["notes"], 0)
+        finally:
+            cache.stop()
+
+
+class TestCachedEndpoints(unittest.TestCase):
+    def test_vault_endpoints_expose_freshness(self):
+        with Server(base_cfg()) as srv:
+            for ep in ("/api/vault/stats", "/api/vault/activity", "/api/vault/graph"):
+                _, body, _ = srv.get(ep)
+                data = json.loads(body)
+                self.assertIn("built_at", data, ep)
+                self.assertIn("age_ms", data, ep)
+                self.assertGreaterEqual(data["age_ms"], 0, ep)
+
+    def test_metrics_endpoint_reports_routes_and_cache(self):
+        with Server(base_cfg()) as srv:
+            srv.get("/api/health")
+            srv.get("/api/vitals")
+            _, body, _ = srv.get("/api/metrics")
+            data = json.loads(body)
+            self.assertIn("/api/health", data["routes"])
+            self.assertGreaterEqual(data["routes"]["/api/health"]["count"], 1)
+            self.assertIn("vault_cache", data)
+            self.assertIsNotNone(data["vault_cache"]["build_ms"])
+
+    def test_repeated_vault_reads_are_served_from_one_scan(self):
+        with Server(base_cfg()) as srv:
+            first = json.loads(srv.get("/api/vault/stats")[1])["built_at"]
+            second = json.loads(srv.get("/api/vault/graph")[1])["built_at"]
+            self.assertEqual(first, second, "both views should come from the same snapshot")
 
 
 if __name__ == "__main__":

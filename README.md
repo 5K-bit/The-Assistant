@@ -88,10 +88,30 @@ back to `/proc` on Linux and `sysctl`/`vm_stat` on macOS.
 | `GET /api/vault/stats` | note, link and byte counts per folder |
 | `GET /api/vault/activity` | most recently modified notes |
 | `GET /api/vault/graph` | most-linked note and its neighbourhood |
+| `GET /api/metrics` | per-route latency and vault-cache freshness |
 | `POST /api/command` | routes a command to the skill that declares it |
 
 Command routing is real; skill *execution* is not wired to an engine yet,
 and the API says so in its reply rather than implying the skill ran.
+
+### Prepared state
+
+The vault endpoints read from a snapshot rebuilt in the background rather
+than walking the vault per request, so a request never waits on the
+filesystem. Each response carries `built_at` and `age_ms`, and the HUD
+shows the snapshot age — a prepared value with no age is a number you
+cannot trust.
+
+Measured on a generated 842-note vault, one HUD vault refresh went from
+188.0 ms to 2.1 ms. Re-measure rather than trusting that number:
+
+```sh
+python3 tools/bench.py --save baseline.json   # capture
+python3 tools/bench.py --compare baseline.json  # after a change
+```
+
+`vault.refresh_seconds` in `config.json` sets the rebuild interval
+(default 10, floor 1).
 
 ### Configuration
 
@@ -127,10 +147,15 @@ keeps it same-origin, so nothing needs to be granted for normal use.
 python3 -m unittest discover -s tests -v
 ```
 
-61 tests over the skill parser, vault reader, vitals probes, config
-resolution and the HTTP surface — including path-traversal attempts, the
-CORS policy, oversized and malformed request bodies, and degraded health.
-Standard library only, like the server itself.
+78 tests over the skill parser, vault reader, vitals probes, config
+resolution, request instrumentation, the prepared-state cache and the HTTP
+surface — including path-traversal attempts, the CORS policy, oversized
+and malformed request bodies, and degraded health. Standard library only,
+like the server itself.
+
+`tests/ui/` holds a browser suite covering the rendered HUD, the controls,
+markup escaping and the offline/reconnect cycle. It needs Node and
+Chromium, so it is kept separate and optional — see `tests/ui/README.md`.
 
 ## HUD
 
@@ -141,6 +166,13 @@ live-vault visualization. Served at `http://127.0.0.1:7777/`.
 Every panel renders from the API. When the backend is not running the HUD
 stays up and shows unknown values as `—` — it never falls back to
 placeholder numbers.
+
+## Plans
+
+`docs/ao-plan.md` is the working phase plan for the distributed operations
+patch: what shipped, the resequencing and why, and the open decisions
+(state ownership, ordering, authentication, and which model the cloud
+instance runs).
 
 ## Status
 

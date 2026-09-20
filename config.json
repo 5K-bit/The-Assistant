@@ -15,6 +15,9 @@
     "skills": "skills",
     "hud": "hud"
   },
+  "vault": {
+    "refresh_seconds": 10
+  },
   "schedule": [
     {"time": "07:00", "title": "Morning brief", "detail": "inbox.md → /output"},
     {"time": "09:00", "title": "Metrics pull", "detail": "metrics.md → numbers snapshot"},

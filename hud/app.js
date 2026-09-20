@@ -174,6 +174,23 @@ function renderVitals(v){
   $("uptime").textContent = v.uptime || UNKNOWN;
 }
 
+function renderFreshness(snapshot){
+  // A prepared value with no age is a number you cannot trust, so the
+  // panel says how old the snapshot behind it is.
+  const node = $("vaultFreshness");
+  const age = snapshot && snapshot.age_ms;
+  const motto = "IF IT ISN'T IN THE VAULT, IT DIDN'T HAPPEN";
+  if(age === null || age === undefined){
+    node.textContent = motto;
+    node.title = "";
+    return;
+  }
+  const seconds = age / 1000;
+  const label = seconds < 1 ? "JUST NOW" : `${Math.round(seconds)}s AGO`;
+  node.textContent = `SNAPSHOT ${label} · ${motto}`;
+  node.title = snapshot.built_at ? `snapshot built ${snapshot.built_at}` : "";
+}
+
 function renderVaultStats(stats){
   $("vaultSize").textContent = bytes(stats.bytes);
   $("vaultNotes").textContent = compact(stats.notes);
@@ -284,6 +301,7 @@ function blankPanels(){
   $("engineBadge").textContent = `ENGINE: ${UNKNOWN}`;
   $("engineBadge").title = "";
   $("skillCount").textContent = UNKNOWN;
+  renderFreshness(null);
   clear($("skillList"));
   clear($("runtimeList"));
   $("runtimeList").appendChild(serviceRow("Backend", "OFFLINE", "off", "warn"));
@@ -328,6 +346,7 @@ async function refreshVault(){
   renderVaultStats(stats);
   renderFeed(activity.rows || []);
   renderGraph(graph);
+  renderFreshness(stats);
 }
 
 async function refreshVitals(){

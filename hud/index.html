@@ -4,6 +4,9 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>The Assistant — HUD</title>
+<!-- Inline brand mark: without an icon the browser requests /favicon.ico
+     and the server 404s it, putting an error in the console every load. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23050807'/%3E%3Crect x='2.5' y='2.5' width='27' height='27' fill='none' stroke='%2330d46c' stroke-width='2'/%3E%3Ctext x='16' y='23' font-family='monospace' font-size='18' font-weight='700' fill='%237cff9f' text-anchor='middle'%3EA%3C/text%3E%3C/svg%3E" />
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -113,7 +116,7 @@
     </section>
 
     <section class="panel" id="vault">
-      <div class="panel-title"><span>Vault Intelligence</span><span>IF IT ISN'T IN THE VAULT, IT DIDN'T HAPPEN</span></div>
+      <div class="panel-title"><span>Vault Intelligence</span><span id="vaultFreshness">IF IT ISN'T IN THE VAULT, IT DIDN'T HAPPEN</span></div>
       <div class="panel-body">
         <div class="vault-wrap">
           <div class="vault-stat">
