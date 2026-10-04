@@ -26,6 +26,7 @@ before the cloud half.
 | 1 | **AO-0** Instrumentation + baseline | **done** | none |
 | 2 | **AO-2** Prepared state (local) | **done** | none |
 | 3 | **AO-4** HUD fast path | mostly done | none |
+| — | **Engine execution** (not an AO phase) | **done** | writes to the vault |
 | 4 | **Auth** (new, was implicit in §27) | not started | blocks AO-5/6 |
 | 5 | **AO-3** Local workers | not started | local only |
 | 6 | **AO-5a** Cloud workers, no model | not started | first network hop |
@@ -64,6 +65,12 @@ polling, because the `/proc/stat` CPU probe takes a fresh 100 ms sample
 when the counters have not moved enough to be meaningful. At the HUD's
 real 5-second cadence it is sub-millisecond. Moving that probe into a
 worker belongs to **AO-3**, not here.
+
+Engine execution is now wired, outside the AO numbering: commands route
+to a skill, run through an interchangeable adapter (`none`, `ollama`, or
+any agent CLI via an argv template), and the result is written into the
+vault. It is off by default, confined to each skill's declared `writes:`
+paths, and never overwrites or deletes.
 
 ---
 

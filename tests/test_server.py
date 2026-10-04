@@ -8,13 +8,14 @@ import time
 import unittest
 import urllib.error
 import urllib.request
-from http.server import ThreadingHTTPServer
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from server import app, config, metrics, skills, vault, vault_cache, vitals  # noqa: E402
+from server import app, config, engine, executor, metrics, skills, vault, vault_cache, vitals  # noqa: E402
 
 
 # ---------- helpers ----------
@@ -654,6 +655,404 @@ class TestCachedEndpoints(unittest.TestCase):
             first = json.loads(srv.get("/api/vault/stats")[1])["built_at"]
             second = json.loads(srv.get("/api/vault/graph")[1])["built_at"]
             self.assertEqual(first, second, "both views should come from the same snapshot")
+
+
+# ---------- engine adapters ----------
+
+ECHO_SCRIPT = "import sys; sys.stdout.write('echo:' + sys.stdin.read()[:40])"
+
+
+class FakeOllama(threading.Thread):
+    """A stand-in Ollama, so the real HTTP client path is exercised."""
+
+    def __init__(self, mode="ok"):
+        super().__init__(daemon=True)
+        self.mode = mode
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                self.rfile.read(length)
+                if outer.mode == "http_error":
+                    body = b'{"error":"model not found"}'
+                    self.send_response(500)
+                elif outer.mode == "not_json":
+                    body = b"this is not json"
+                    self.send_response(200)
+                elif outer.mode == "no_content":
+                    body = b'{"message":{}}'
+                    self.send_response(200)
+                else:
+                    body = b'{"message":{"role":"assistant","content":"a reply"}}'
+                    self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.httpd.server_address[1]
+
+    def run(self):
+        self.httpd.serve_forever()
+
+    def stop(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+    @property
+    def base(self):
+        return f"http://127.0.0.1:{self.port}"
+
+
+class TestEngineBuild(unittest.TestCase):
+    def test_disabled_by_default(self):
+        adapter = engine.build({})
+        self.assertFalse(adapter.available)
+        self.assertEqual(adapter.name, "none")
+
+    def test_disabled_adapter_refuses_to_run(self):
+        with self.assertRaises(engine.EngineError):
+            engine.build({}).run("anything")
+
+    def test_unknown_adapter_is_rejected(self):
+        with self.assertRaises(engine.EngineError):
+            engine.build({"execution": {"enabled": True, "adapter": "telepathy"}})
+
+    def test_enabled_selects_named_adapter(self):
+        adapter = engine.build({"execution": {"enabled": True, "adapter": "ollama"}})
+        self.assertEqual(adapter.name, "ollama")
+        self.assertTrue(adapter.available)
+
+
+class TestCommandAdapter(unittest.TestCase):
+    def build(self, **over):
+        cfg = {"enabled": True, "adapter": "command", "timeout_seconds": 30}
+        cfg.update(over)
+        return engine.build({"execution": cfg})
+
+    def test_no_command_configured(self):
+        with self.assertRaises(engine.EngineError) as ctx:
+            self.build(command=[]).run("hello")
+        self.assertIn("no command configured", str(ctx.exception))
+
+    def test_prompt_on_stdin(self):
+        adapter = self.build(command=[sys.executable, "-c", ECHO_SCRIPT])
+        self.assertTrue(adapter.run("ping").startswith("echo:ping"))
+
+    def test_prompt_substituted_as_single_argument(self):
+        adapter = self.build(
+            command=[sys.executable, "-c", "import sys; print(sys.argv[1][::-1])", "{prompt}"]
+        )
+        self.assertEqual(adapter.run("abc"), "cba")
+
+    def test_prompt_is_never_shell_interpreted(self):
+        adapter = self.build(
+            command=[sys.executable, "-c", "import sys; print(len(sys.argv[1]))", "{prompt}"]
+        )
+        hostile = "; rm -rf /; $(whoami) `id`"
+        self.assertEqual(adapter.run(hostile), str(len(hostile)))
+
+    def test_missing_binary(self):
+        with self.assertRaises(engine.EngineError) as ctx:
+            self.build(command=["definitely-not-a-real-binary-xyz"]).run("x")
+        self.assertIn("not found", str(ctx.exception))
+
+    def test_non_zero_exit_reports_stderr(self):
+        adapter = self.build(
+            command=[sys.executable, "-c", "import sys; sys.stderr.write('boom'); sys.exit(3)"]
+        )
+        with self.assertRaises(engine.EngineError) as ctx:
+            adapter.run("x")
+        self.assertIn("exited 3", str(ctx.exception))
+        self.assertIn("boom", str(ctx.exception))
+
+    def test_empty_output_is_a_failure_not_a_blank_answer(self):
+        with self.assertRaises(engine.EngineError):
+            self.build(command=[sys.executable, "-c", "pass"]).run("x")
+
+    def test_timeout(self):
+        adapter = self.build(
+            command=[sys.executable, "-c", "import time; time.sleep(5)"], timeout_seconds=1
+        )
+        with self.assertRaises(engine.EngineError) as ctx:
+            adapter.run("x")
+        self.assertIn("timed out", str(ctx.exception))
+
+
+class TestOllamaAdapter(unittest.TestCase):
+    def adapter(self, base, **over):
+        cfg = {"enabled": True, "adapter": "ollama", "base_url": base, "timeout_seconds": 10}
+        cfg.update(over)
+        return engine.build({"execution": cfg})
+
+    def test_success(self):
+        server = FakeOllama("ok")
+        server.start()
+        try:
+            self.assertEqual(self.adapter(server.base).run("hi"), "a reply")
+        finally:
+            server.stop()
+
+    def test_http_error_is_surfaced(self):
+        server = FakeOllama("http_error")
+        server.start()
+        try:
+            with self.assertRaises(engine.EngineError) as ctx:
+                self.adapter(server.base).run("hi")
+            self.assertIn("500", str(ctx.exception))
+        finally:
+            server.stop()
+
+    def test_non_json_response(self):
+        server = FakeOllama("not_json")
+        server.start()
+        try:
+            with self.assertRaises(engine.EngineError):
+                self.adapter(server.base).run("hi")
+        finally:
+            server.stop()
+
+    def test_missing_content_is_not_treated_as_an_answer(self):
+        server = FakeOllama("no_content")
+        server.start()
+        try:
+            with self.assertRaises(engine.EngineError) as ctx:
+                self.adapter(server.base).run("hi")
+            self.assertIn("no content", str(ctx.exception))
+        finally:
+            server.stop()
+
+    def test_unreachable(self):
+        with self.assertRaises(engine.EngineError) as ctx:
+            self.adapter("http://127.0.0.1:1").run("hi")
+        self.assertIn("unreachable", str(ctx.exception))
+
+
+# ---------- executor ----------
+
+class StubAdapter:
+    name = "stub"
+    available = True
+
+    def __init__(self, reply="a result", fail=None):
+        self.reply, self.fail, self.prompts = reply, fail, []
+
+    def describe(self):
+        return "stub"
+
+    def run(self, prompt):
+        self.prompts.append(prompt)
+        if self.fail:
+            raise engine.EngineError(self.fail)
+        return self.reply
+
+
+class TestExecutor(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.v = Path(self.tmp.name)
+        for f in ("raw", "wiki", "output"):
+            (self.v / f).mkdir()
+        self.skills = {s["file"]: s for s in skills.load(REPO / "skills")}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_strip_frontmatter(self):
+        self.assertEqual(executor.strip_frontmatter("---\na: b\n---\n\nBody"), "Body")
+        self.assertEqual(executor.strip_frontmatter("No frontmatter"), "No frontmatter")
+        self.assertEqual(executor.strip_frontmatter("---\nunterminated\n"), "---\nunterminated")
+
+    def test_prompt_carries_contract_skill_state_and_request(self):
+        prompt = executor.build_prompt("CORE", "SKILL", "metrics", {"notes": 3})
+        for probe in ("Operating contract", "CORE", "Active skill", "SKILL",
+                      "notes: 3", "The operator ran: metrics"):
+            self.assertIn(probe, prompt)
+
+    def test_output_path_uses_declared_write_root(self):
+        path = executor.output_path(self.skills["metrics.md"], self.v)
+        self.assertTrue(path.is_relative_to(self.v / "output"))
+        self.assertTrue(path.name.endswith("-metrics.md"))
+
+    def test_skill_declaring_no_writes_writes_nothing(self):
+        self.assertIsNone(executor.output_path({"name": "x", "writes": []}, self.v))
+
+    def test_write_root_cannot_escape_the_vault(self):
+        for hostile in ("/../../etc", "/../outside", "/.."):
+            self.assertIsNone(
+                executor.output_path({"name": "x", "writes": [hostile]}, self.v), hostile
+            )
+
+    def test_existing_note_is_never_overwritten(self):
+        skill = self.skills["metrics.md"]
+        now = datetime(2026, 1, 1, 12, 0, 0)
+        first = executor.output_path(skill, self.v, now)
+        executor.write_output(first, skill, "metrics", "stub", "one")
+        second = executor.output_path(skill, self.v, now)
+        self.assertNotEqual(first, second)
+        self.assertEqual(first.read_text(encoding="utf-8").strip().split("\n")[-1], "one")
+
+    def test_written_note_records_provenance(self):
+        skill = self.skills["metrics.md"]
+        path = executor.write_output(
+            executor.output_path(skill, self.v), skill, "metrics", "stub engine", "BODY"
+        )
+        text = path.read_text(encoding="utf-8")
+        for probe in ("skill: metrics", "command: metrics", "engine: stub engine", "BODY"):
+            self.assertIn(probe, text)
+
+    def test_successful_run_writes_and_reports(self):
+        stub = StubAdapter("## Result\nall good")
+        runner = executor.Runner(self.v, REPO / "skills", stub)
+        job = runner.run_sync(self.skills["metrics.md"], "metrics", {"notes": 0})
+        self.assertEqual(job.status, "done")
+        self.assertIsNone(job.error)
+        self.assertIn("all good", job.reply)
+        self.assertTrue((self.v / job.output.lstrip("/")).is_file())
+        self.assertIn("quantitative pulse", stub.prompts[0])
+
+    def test_failed_run_reports_and_writes_nothing(self):
+        runner = executor.Runner(self.v, REPO / "skills", StubAdapter(fail="engine offline"))
+        job = runner.run_sync(self.skills["metrics.md"], "metrics")
+        self.assertEqual(job.status, "failed")
+        self.assertIn("engine offline", job.error)
+        self.assertIsNone(job.output)
+        self.assertEqual(list((self.v / "output").rglob("*.md")), [])
+
+    def test_unexpected_adapter_error_does_not_escape(self):
+        class Exploding(StubAdapter):
+            def run(self, prompt):
+                raise ValueError("kaboom")
+
+        runner = executor.Runner(self.v, REPO / "skills", Exploding())
+        job = runner.run_sync(self.skills["metrics.md"], "metrics")
+        self.assertEqual(job.status, "failed")
+        self.assertIn("kaboom", job.error)
+
+    def test_background_start_completes(self):
+        runner = executor.Runner(self.v, REPO / "skills", StubAdapter())
+        job = runner.start(self.skills["metrics.md"], "metrics")
+        deadline = time.time() + 10
+        while time.time() < deadline and runner.get(job.id)["status"] == "running":
+            time.sleep(0.05)
+        self.assertEqual(runner.get(job.id)["status"], "done")
+
+    def test_job_history_is_newest_first_and_bounded(self):
+        runner = executor.Runner(self.v, REPO / "skills", StubAdapter())
+        for _ in range(executor.MAX_JOBS + 5):
+            runner.run_sync(self.skills["metrics.md"], "metrics")
+        self.assertLessEqual(len(runner._order), executor.MAX_JOBS)
+        recent = runner.recent(3)
+        self.assertEqual(len(recent), 3)
+
+    def test_unknown_job_id(self):
+        runner = executor.Runner(self.v, REPO / "skills", StubAdapter())
+        self.assertIsNone(runner.get("nope"))
+
+
+# ---------- execution over HTTP ----------
+
+def exec_cfg(vault, command):
+    cfg = base_cfg()
+    cfg["paths"] = {**cfg["paths"], "vault": vault}
+    cfg["engine"] = {
+        **cfg["engine"],
+        "execution": {
+            "enabled": True,
+            "adapter": "command",
+            "command": command,
+            "timeout_seconds": 30,
+        },
+    }
+    return cfg
+
+
+class TestExecutionHTTP(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.v = Path(self.tmp.name)
+        for f in ("raw", "wiki", "output"):
+            (self.v / f).mkdir()
+        self.cfg = exec_cfg(self.v, [sys.executable, "-c", ECHO_SCRIPT])
+
+    def tearDown(self):
+        app.stop_caches()
+        self.tmp.cleanup()
+
+    def test_command_starts_a_job_that_completes(self):
+        with Server(self.cfg) as srv:
+            status, data = srv.post("/api/command", {"command": "metrics"})
+            self.assertEqual(status, 202)
+            self.assertTrue(data["routed"])
+            self.assertEqual(data["status"], "running")
+            job_id = data["job_id"]
+
+            deadline = time.time() + 15
+            job = None
+            while time.time() < deadline:
+                _, body, _ = srv.get(f"/api/jobs/{job_id}")
+                job = json.loads(body)
+                if job["status"] != "running":
+                    break
+                time.sleep(0.1)
+
+            self.assertEqual(job["status"], "done", job)
+            self.assertIn("echo:", job["reply"])
+            self.assertTrue(job["output"].startswith("/output/metrics/"))
+            self.assertTrue((self.v / job["output"].lstrip("/")).is_file())
+
+    def test_unknown_job_is_404(self):
+        with Server(self.cfg) as srv:
+            status, body, _ = srv.get("/api/jobs/doesnotexist")
+            self.assertEqual(status, 404)
+            self.assertIn("error", json.loads(body))
+
+    def test_jobs_list(self):
+        with Server(self.cfg) as srv:
+            srv.post("/api/command", {"command": "metrics"})
+            _, body, _ = srv.get("/api/jobs")
+            self.assertGreaterEqual(len(json.loads(body)["jobs"]), 1)
+
+    def test_health_reports_execution_state(self):
+        with Server(self.cfg) as srv:
+            _, body, _ = srv.get("/api/health")
+            self.assertEqual(
+                json.loads(body)["execution"], {"enabled": True, "adapter": "command"}
+            )
+
+    def test_config_exposes_state_without_the_command_line(self):
+        with Server(self.cfg) as srv:
+            _, body, _ = srv.get("/api/config")
+            self.assertEqual(
+                json.loads(body)["engine"]["execution"],
+                {"enabled": True, "adapter": "command"},
+            )
+            self.assertNotIn(b"-c", body)
+
+    def test_unknown_command_still_does_not_execute(self):
+        with Server(self.cfg) as srv:
+            status, data = srv.post("/api/command", {"command": "summon dragons"})
+            self.assertEqual(status, 200)
+            self.assertFalse(data["routed"])
+            self.assertNotIn("job_id", data)
+
+
+class TestExecutionDisabledByDefault(unittest.TestCase):
+    def test_repo_config_does_not_execute(self):
+        self.assertFalse(config.load()["engine"]["execution"]["enabled"])
+
+    def test_disabled_response_is_unchanged(self):
+        with Server(base_cfg()) as srv:
+            status, data = srv.post("/api/command", {"command": "metrics"})
+            self.assertEqual(status, 200)
+            self.assertTrue(data["routed"])
+            self.assertIs(data["executed"], False)
+            self.assertNotIn("job_id", data)
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import config, metrics, skills, vault_cache, vitals
+from . import config, engine, executor, metrics, skills, vault_cache, vitals
 
 API_VERSION = "0.1.0"
 MAX_BODY_BYTES = 64 * 1024
@@ -40,11 +40,33 @@ def get_cache(cfg):
         return cache
 
 
+# One skill runner per vault, holding the engine adapter and job history.
+_runners = {}
+_runners_lock = threading.Lock()
+
+
+def get_runner(cfg):
+    # Keyed by vault *and* execution settings: two configs pointing at the
+    # same vault with different engines must not share one adapter.
+    execution = (cfg["engine"].get("execution") or {})
+    key = (str(cfg["paths"]["vault"]), repr(sorted(execution.items(), key=str)))
+    with _runners_lock:
+        runner = _runners.get(key)
+        if runner is None:
+            runner = executor.Runner(
+                cfg["paths"]["vault"], cfg["paths"]["skills"], engine.build(cfg["engine"])
+            )
+            _runners[key] = runner
+        return runner
+
+
 def stop_caches():
     with _caches_lock:
         for cache in _caches.values():
             cache.stop()
         _caches.clear()
+    with _runners_lock:
+        _runners.clear()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -109,9 +131,13 @@ class Handler(BaseHTTPRequestHandler):
             "/api/vault/activity": self.api_vault_activity,
             "/api/vault/graph": self.api_vault_graph,
             "/api/metrics": self.api_metrics,
+            "/api/jobs": self.api_jobs,
         }
         if path in routes:
             return self._timed(path, routes[path])
+        if path.startswith("/api/jobs/"):
+            job_id = path[len("/api/jobs/"):]
+            return self._timed("/api/jobs/:id", lambda: self.api_job(job_id))
         if path.startswith("/api/"):
             return self._timed("api:unknown", lambda: self._json({"error": "not found", "path": path}, 404))
         if self.cfg["server"].get("serve_hud", True):
@@ -160,6 +186,7 @@ class Handler(BaseHTTPRequestHandler):
             "vault": vault_dir.is_dir(),
             "hud": (self.cfg["paths"]["hud"] / "index.html").is_file(),
         }
+        adapter = get_runner(self.cfg).adapter
         return self._json(
             {
                 "status": "ok" if all(checks.values()) else "degraded",
@@ -167,16 +194,25 @@ class Handler(BaseHTTPRequestHandler):
                 "engine": self.cfg["engine"]["name"],
                 "runtime": self.cfg["engine"]["runtime"],
                 "started_at": STARTED_AT.isoformat(),
+                "execution": {"enabled": adapter.available, "adapter": adapter.name},
                 "checks": checks,
             },
             200 if all(checks.values()) else 503,
         )
 
     def api_config(self):
-        # Only the view-facing subset: filesystem paths stay server-side.
+        # Only the view-facing subset: filesystem paths stay server-side,
+        # and the execution block may hold a local command line.
+        adapter = get_runner(self.cfg).adapter
+        engine_cfg = {
+            key: value for key, value in self.cfg["engine"].items() if key != "execution"
+        }
+        # The adapter's description can contain a local command line, so
+        # only its name and state cross the API boundary.
+        engine_cfg["execution"] = {"enabled": adapter.available, "adapter": adapter.name}
         return self._json(
             {
-                "engine": self.cfg["engine"],
+                "engine": engine_cfg,
                 "schedule": self.cfg["schedule"],
                 "version": API_VERSION,
             }
@@ -217,6 +253,15 @@ class Handler(BaseHTTPRequestHandler):
         graph = snapshot.get("graph") or {"nodes": [], "edges": []}
         return self._json({**graph, **self._freshness(snapshot)})
 
+    def api_jobs(self):
+        return self._json({"jobs": get_runner(self.cfg).recent()})
+
+    def api_job(self, job_id):
+        job = get_runner(self.cfg).get(job_id)
+        if job is None:
+            return self._json({"error": "no such job", "job_id": job_id}, 404)
+        return self._json(job)
+
     def api_metrics(self):
         snapshot = self._vault_snapshot()
         payload = metrics.snapshot()
@@ -247,16 +292,40 @@ class Handler(BaseHTTPRequestHandler):
                 }
             )
 
-        # Routing is real; execution is not wired yet. Say exactly that
-        # rather than implying the skill ran.
+        skill = next(s for s in skill_list if s["file"] == index[verb])
+        runner = get_runner(self.cfg)
+
+        if not runner.adapter.available:
+            # Execution is off. Say exactly that rather than implying a run.
+            return self._json(
+                {
+                    "reply": f"routed to {index[verb]} — {engine} execution not wired yet.",
+                    "command": raw,
+                    "skill": index[verb],
+                    "routed": True,
+                    "executed": False,
+                }
+            )
+
+        snapshot = self._vault_snapshot()
+        stats = snapshot.get("stats", {})
+        context = {
+            "now": datetime.now(timezone.utc).isoformat(),
+            "vault notes": stats.get("notes"),
+            "vault links": stats.get("links"),
+            "snapshot age (ms)": snapshot.get("age_ms"),
+        }
+        job = runner.start(skill, raw, context)
         return self._json(
             {
-                "reply": f"routed to {index[verb]} — {engine} execution not wired yet.",
+                "reply": f"routed to {index[verb]} — running on {runner.adapter.describe()}.",
                 "command": raw,
                 "skill": index[verb],
                 "routed": True,
-                "executed": False,
-            }
+                "job_id": job.id,
+                "status": job.status,
+            },
+            202,
         )
 
 

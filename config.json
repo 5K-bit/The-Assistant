@@ -2,7 +2,15 @@
   "engine": {
     "name": "OpenCode",
     "runtime": "Ollama",
-    "adapters": ["OpenCode", "Claude Code"]
+    "adapters": ["OpenCode", "Claude Code"],
+    "execution": {
+      "enabled": false,
+      "adapter": "none",
+      "model": "llama3",
+      "base_url": "http://127.0.0.1:11434",
+      "command": [],
+      "timeout_seconds": 120
+    }
   },
   "server": {
     "host": "127.0.0.1",

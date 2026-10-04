@@ -89,10 +89,60 @@ back to `/proc` on Linux and `sysctl`/`vm_stat` on macOS.
 | `GET /api/vault/activity` | most recently modified notes |
 | `GET /api/vault/graph` | most-linked note and its neighbourhood |
 | `GET /api/metrics` | per-route latency and vault-cache freshness |
-| `POST /api/command` | routes a command to the skill that declares it |
+| `GET /api/jobs` | recent skill runs |
+| `GET /api/jobs/<id>` | one run: status, reply, where it was written |
+| `POST /api/command` | routes a command to the skill that declares it, and runs it when execution is on |
 
-Command routing is real; skill *execution* is not wired to an engine yet,
-and the API says so in its reply rather than implying the skill ran.
+## Execution
+
+**Off by default.** With execution disabled, a command routes to the right
+skill and the reply says exactly that — nothing runs.
+
+Turn it on and a command becomes a real run: the shared contract in
+`assistant_core.md` plus the routed skill plus current vault state go to
+the engine, and the reply is written into the vault.
+
+```sh
+ASSISTANT_EXEC=true ASSISTANT_EXEC_ADAPTER=ollama \
+ASSISTANT_EXEC_MODEL=llama3 python3 -m server
+```
+
+Or set `engine.execution` in `config.json` to make it the default.
+
+| Adapter | Drives |
+| --- | --- |
+| `none` | nothing — routing only (the default) |
+| `ollama` | a local Ollama over its HTTP chat API |
+| `command` | **any** agent CLI, from an argv template you supply |
+
+The `command` adapter is how OpenCode, Claude Code or anything else gets
+driven — you give the exact command, so no adapter has to guess at a CLI's
+flags:
+
+```sh
+ASSISTANT_EXEC=true ASSISTANT_EXEC_ADAPTER=command \
+ASSISTANT_EXEC_COMMAND="opencode run --quiet" python3 -m server
+```
+
+The prompt arrives on the process's stdin, or replaces the literal token
+`{prompt}` in the argv if you put one there. The command is never run
+through a shell, so nothing in a prompt can be read as shell syntax.
+
+Runs happen on a background thread — a local model can take a minute, and
+the HUD must not block. `POST /api/command` returns `202` with a `job_id`;
+the HUD polls `/api/jobs/<id>` and prints the reply when it lands.
+
+### What a run may do
+
+- It writes **only** inside the paths its skill's `writes:` frontmatter
+  declares. A skill declaring none writes nothing, and a declared path
+  that escapes the vault is refused.
+- It **never overwrites and never deletes.** Each run creates a new
+  timestamped note carrying the skill, command, engine and time it came
+  from.
+- A failure is reported as a failure. An unreachable engine, a non-zero
+  exit or an empty reply all surface as a failed job — never as a blank
+  answer presented as a result.
 
 ### Prepared state
 
@@ -123,7 +173,10 @@ ASSISTANT_ENGINE="Claude Code" ASSISTANT_PORT=7788 python3 -m server
 ```
 
 `ASSISTANT_ENGINE`, `ASSISTANT_RUNTIME`, `ASSISTANT_HOST`, `ASSISTANT_PORT`,
-`ASSISTANT_VAULT` and `ASSISTANT_SKILLS` are recognised.
+`ASSISTANT_VAULT` and `ASSISTANT_SKILLS` are recognised, as are
+`ASSISTANT_EXEC`, `ASSISTANT_EXEC_ADAPTER`, `ASSISTANT_EXEC_MODEL`,
+`ASSISTANT_EXEC_BASE_URL`, `ASSISTANT_EXEC_COMMAND` and
+`ASSISTANT_EXEC_TIMEOUT` for execution.
 
 To run against a real Obsidian vault instead of the one in this repo,
 point `paths.vault` in `config.json` at it, or pass it per-run:
@@ -147,9 +200,9 @@ keeps it same-origin, so nothing needs to be granted for normal use.
 python3 -m unittest discover -s tests -v
 ```
 
-78 tests over the skill parser, vault reader, vitals probes, config
-resolution, request instrumentation, the prepared-state cache and the HTTP
-surface — including path-traversal attempts, the CORS policy, oversized
+116 tests over the skill parser, vault reader, vitals probes, config
+resolution, request instrumentation, the prepared-state cache, the engine
+adapters, the executor and the HTTP surface — including path-traversal attempts, the CORS policy, oversized
 and malformed request bodies, and degraded health. Standard library only,
 like the server itself.
 
@@ -177,6 +230,9 @@ instance runs).
 ## Status
 
 Early architecture / v0.1. The HUD and its API are live against the real
-vault and skill set. Voice (local STT/TTS) and engine execution are not
-wired yet, and the HUD labels them `NOT WIRED` rather than showing them
-armed.
+vault and skill set, and the full loop runs: **Speak → Route → Remember**
+— a command routes to a skill, the engine runs it, and the result lands in
+the vault.
+
+Voice (local STT/TTS) is still not built, and the HUD labels it
+`NOT WIRED` rather than showing it armed.

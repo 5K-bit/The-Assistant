@@ -69,6 +69,41 @@ function logLine(role, text){
   terminal.scrollTop = terminal.scrollHeight;
 }
 
+const JOB_POLL_MS = 1000;
+const JOB_MAX_POLLS = 300;   // five minutes; a local model can be slow.
+
+/** Follow a running skill job to its end, reporting what actually happened. */
+async function followJob(jobId){
+  for(let i = 0; i < JOB_MAX_POLLS; i++){
+    await new Promise(r => setTimeout(r, JOB_POLL_MS));
+    let job;
+    try{
+      job = await api(`/api/jobs/${encodeURIComponent(jobId)}`);
+    }catch(e){
+      logLine("ASSISTANT", "lost contact with the backend while the skill was running.");
+      return;
+    }
+    if(job.status === "running") continue;
+
+    if(job.status === "failed"){
+      logLine("ASSISTANT", `run failed — ${job.error || "no reason given"}`);
+      return;
+    }
+    (job.reply || "").split("\n").filter(line => line.trim()).forEach(line => {
+      logLine("ASSISTANT", line);
+    });
+    if(job.output){
+      logLine("SYS", `written to vault: ${job.output}`);
+    }else if(job.error){
+      // The skill ran even though the note did not land; do not imply it did.
+      logLine("SYS", job.error);
+    }
+    refreshVault().catch(() => {});
+    return;
+  }
+  logLine("ASSISTANT", "still running after five minutes — check /api/jobs.");
+}
+
 async function runCommand(command){
   if(!command.trim()) return;
   logLine("YOU", command);
@@ -80,6 +115,9 @@ async function runCommand(command){
       body:JSON.stringify({command})
     });
     logLine("ASSISTANT", data.reply || "command complete");
+    if(data.job_id){
+      followJob(data.job_id);
+    }
   }catch(e){
     logLine("ASSISTANT", `backend unreachable — '${command}' not routed.`);
   }
@@ -121,8 +159,10 @@ function renderRuntime(cfg, health){
   const engine = (cfg.engine && cfg.engine.name) || UNKNOWN;
 
   // "CONFIGURED" rather than "READY": config names the engine, but the
-  // server does not probe whether that agent is actually running.
-  list.appendChild(serviceRow(engine, "CONFIGURED", "", "ok"));
+  // server does not probe whether that agent is actually running. When
+  // execution is on, say that much and no more — a run can still fail.
+  const executes = !!(cfg.engine && cfg.engine.execution && cfg.engine.execution.enabled);
+  list.appendChild(serviceRow(engine, executes ? "EXECUTION ON" : "CONFIGURED", "", "ok"));
   list.appendChild(serviceRow(
     "Obsidian Vault",
     checks.vault ? "RW" : "MISSING",
