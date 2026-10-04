@@ -98,19 +98,20 @@
           <div class="audio-grid">
             <div class="audio-card">
               <div class="section-label" style="margin-top:0">Input / STT</div>
-              <div class="big">LOCAL MIC</div>
+              <div class="big" id="sttLabel">&mdash;</div>
               <div class="level" id="micLevel"></div>
             </div>
             <div class="audio-card">
               <div class="section-label" style="margin-top:0">Output / TTS</div>
-              <div class="big">LOCAL VOICE</div>
+              <div class="big" id="ttsLabel">&mdash;</div>
               <div class="level" id="ttsLevel"></div>
             </div>
           </div>
           <div class="ptt" id="ptt">HOLD SPACE // PUSH TO TALK</div>
           <div class="section-label">Privacy</div>
-          <div class="service" style="padding-top:0"><span>Audio route</span><span class="ok">ON-DEVICE</span></div>
-          <div class="service"><span>Network audio</span><span class="ok">BLOCKED</span></div>
+          <div class="service" style="padding-top:0"><span>Audio route</span><span id="audioRoute" class="dim">&mdash;</span></div>
+          <div class="service"><span>Network audio</span><span id="networkAudio" class="dim">&mdash;</span></div>
+          <div class="service"><span>Spoken replies</span><button class="toggle" id="muteBtn" type="button">&mdash;</button></div>
         </div>
       </section>
     </section>

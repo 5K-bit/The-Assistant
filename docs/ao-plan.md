@@ -27,6 +27,7 @@ before the cloud half.
 | 2 | **AO-2** Prepared state (local) | **done** | none |
 | 3 | **AO-4** HUD fast path | mostly done | none |
 | — | **Engine execution** (not an AO phase) | **done** | writes to the vault |
+| — | **Voice** (not an AO phase) | **done** | microphone, local tools |
 | 4 | **Auth** (new, was implicit in §27) | not started | blocks AO-5/6 |
 | 5 | **AO-3** Local workers | not started | local only |
 | 6 | **AO-5a** Cloud workers, no model | not started | first network hop |
@@ -71,6 +72,20 @@ to a skill, run through an interchangeable adapter (`none`, `ollama`, or
 any agent CLI via an argv template), and the result is written into the
 vault. It is off by default, confined to each skill's declared `writes:`
 paths, and never overwrites or deletes.
+
+Voice is wired too, on the same terms: push-to-talk capture in the HUD,
+transcription and synthesis through argv-template adapters so no tool is
+named in code, and a `browser` mode that uses on-device voices only. Also
+off by default. The audio panel stopped being decoration in the process —
+its level meters now show measured amplitude and sit flat when nothing is
+flowing, and the privacy rows report the route actually in use instead of
+asserting `ON-DEVICE` / `BLOCKED` unconditionally.
+
+This matters for **AO-5** and **AO-6**: the moment a tailnet address can
+reach this server, voice stops being loopback-only. The privacy rows
+already say so — they read `SENT TO <host>` off localhost — but
+authentication has to land before that is a configuration anyone should
+choose.
 
 ---
 

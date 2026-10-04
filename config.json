@@ -12,6 +12,22 @@
       "timeout_seconds": 120
     }
   },
+  "voice": {
+    "stt": {
+      "enabled": false,
+      "adapter": "none",
+      "command": [],
+      "timeout_seconds": 120,
+      "strip_timestamps": true
+    },
+    "tts": {
+      "enabled": false,
+      "adapter": "none",
+      "command": [],
+      "timeout_seconds": 60,
+      "speak_replies": true
+    }
+  },
   "server": {
     "host": "127.0.0.1",
     "port": 7777,

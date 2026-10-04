@@ -17,10 +17,13 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import config, engine, executor, metrics, skills, vault_cache, vitals
+from . import config, engine, executor, metrics, skills, vault_cache, vitals, voice
 
 API_VERSION = "0.1.0"
 MAX_BODY_BYTES = 64 * 1024
+# A recording is orders of magnitude larger than a command: 16 kHz mono
+# 16-bit PCM is 32 KB a second, so this allows roughly four minutes.
+MAX_AUDIO_BYTES = 8 * 1024 * 1024
 
 STARTED_AT = datetime.now(timezone.utc)
 
@@ -60,6 +63,30 @@ def get_runner(cfg):
         return runner
 
 
+# One pair of voice adapters per voice configuration.
+_voices = {}
+_voices_lock = threading.Lock()
+
+
+def get_voice(cfg):
+    """Return (stt, tts, error) for this config.
+
+    A bad adapter name in config must not take the HUD down with it, so
+    this falls back to silence and hands back the reason to report.
+    """
+    settings = cfg.get("voice") or {}
+    key = repr([(k, sorted((settings.get(k) or {}).items(), key=str)) for k in ("stt", "tts")])
+    with _voices_lock:
+        trio = _voices.get(key)
+        if trio is None:
+            try:
+                trio = (voice.build_stt(settings), voice.build_tts(settings), None)
+            except voice.VoiceError as exc:
+                trio = (voice.SttNone(), voice.TtsNone(), str(exc))
+            _voices[key] = trio
+        return trio
+
+
 def stop_caches():
     with _caches_lock:
         for cache in _caches.values():
@@ -67,6 +94,8 @@ def stop_caches():
         _caches.clear()
     with _runners_lock:
         _runners.clear()
+    with _voices_lock:
+        _voices.clear()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -132,6 +161,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/vault/graph": self.api_vault_graph,
             "/api/metrics": self.api_metrics,
             "/api/jobs": self.api_jobs,
+            "/api/voice": self.api_voice,
         }
         if path in routes:
             return self._timed(path, routes[path])
@@ -144,21 +174,56 @@ class Handler(BaseHTTPRequestHandler):
             return self._timed("static", lambda: self.serve_static(path))
         return self._timed("unknown", lambda: self._json({"error": "not found"}, 404))
 
-    def do_POST(self):
-        path = self.path.split("?", 1)[0].rstrip("/")
-        if path != "/api/command":
-            return self._json({"error": "not found", "path": path}, 404)
+    def _drain(self, total):
+        """Discard up to `total` bytes of a body we are refusing."""
+        remaining = total
+        while remaining > 0:
+            chunk = self.rfile.read(min(65536, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+
+    def _read_body(self, limit):
+        """Read the request body, or send the error and return None."""
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
-            return self._json({"error": "bad content-length"}, 400)
-        if length > MAX_BODY_BYTES:
-            return self._json({"error": "body too large"}, 413)
+            self._json({"error": "bad content-length"}, 400)
+            return None
+        if length > limit:
+            # Read off what the client is already sending before answering,
+            # or it sees a broken pipe instead of the 413. Bounded, so an
+            # absurd Content-Length cannot hold the thread open forever.
+            self._drain(min(length, limit * 2))
+            self.close_connection = True
+            self._json({"error": "body too large", "limit": limit}, 413)
+            return None
+        return self.rfile.read(length)
+
+    def do_POST(self):
+        path = self.path.split("?", 1)[0].rstrip("/")
+        if path == "/api/voice/stt":
+            # A recording gets its own, much larger limit and never goes
+            # near the JSON parser.
+            audio = self._read_body(MAX_AUDIO_BYTES)
+            if audio is None:
+                return None
+            return self._timed(path, lambda: self.api_voice_stt(audio))
+
+        routes = {
+            "/api/command": self.api_command,
+            "/api/voice/speak": self.api_voice_speak,
+        }
+        if path not in routes:
+            return self._json({"error": "not found", "path": path}, 404)
+        body = self._read_body(MAX_BODY_BYTES)
+        if body is None:
+            return None
         try:
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = json.loads(body or b"{}")
         except (json.JSONDecodeError, UnicodeDecodeError):
             return self._json({"error": "invalid json"}, 400)
-        return self._timed("/api/command", lambda: self.api_command(payload))
+        return self._timed(path, lambda: routes[path](payload))
 
     # --- static HUD ---------------------------------------------------
 
@@ -187,6 +252,7 @@ class Handler(BaseHTTPRequestHandler):
             "hud": (self.cfg["paths"]["hud"] / "index.html").is_file(),
         }
         adapter = get_runner(self.cfg).adapter
+        stt, tts, _ = get_voice(self.cfg)
         return self._json(
             {
                 "status": "ok" if all(checks.values()) else "degraded",
@@ -195,6 +261,7 @@ class Handler(BaseHTTPRequestHandler):
                 "runtime": self.cfg["engine"]["runtime"],
                 "started_at": STARTED_AT.isoformat(),
                 "execution": {"enabled": adapter.available, "adapter": adapter.name},
+                "voice": voice.state(stt, tts, self.cfg.get("voice")),
                 "checks": checks,
             },
             200 if all(checks.values()) else 503,
@@ -261,6 +328,54 @@ class Handler(BaseHTTPRequestHandler):
         if job is None:
             return self._json({"error": "no such job", "job_id": job_id}, 404)
         return self._json(job)
+
+    def api_voice(self):
+        stt, tts, error = get_voice(self.cfg)
+        payload = voice.state(stt, tts, self.cfg.get("voice"))
+        if error:
+            payload["error"] = error
+        return self._json(payload)
+
+    def api_voice_stt(self, audio):
+        stt, _, _ = get_voice(self.cfg)
+        if not stt.available:
+            return self._json({"error": "transcription is not enabled", "adapter": stt.name}, 409)
+        if not audio:
+            return self._json({"error": "no audio received"}, 400)
+        if not voice.is_wav(audio):
+            return self._json({"error": "expected a WAV recording"}, 415)
+        start = time.perf_counter()
+        try:
+            text = stt.transcribe(audio)
+        except voice.VoiceError as exc:
+            # A transcription that failed is reported as failed. Returning
+            # an empty string would read as "you said nothing".
+            return self._json({"error": str(exc), "adapter": stt.name}, 502)
+        return self._json(
+            {
+                "text": text,
+                "adapter": stt.name,
+                "bytes": len(audio),
+                "ms": round((time.perf_counter() - start) * 1000, 1),
+            }
+        )
+
+    def api_voice_speak(self, payload):
+        _, tts, _ = get_voice(self.cfg)
+        if not tts.available:
+            return self._json({"error": "speech is not enabled", "adapter": tts.name}, 409)
+        if not tts.server_side:
+            # The HUD synthesises in this mode; saying so beats returning
+            # silence that would look like success.
+            return self._json({"error": tts.describe(), "mode": "browser"}, 409)
+        text = str((payload or {}).get("text") or "").strip()
+        if not text:
+            return self._json({"error": "no text to speak"}, 400)
+        try:
+            audio, content_type = tts.speak(text)
+        except voice.VoiceError as exc:
+            return self._json({"error": str(exc), "adapter": tts.name}, 502)
+        return self._send(200, audio, content_type)
 
     def api_metrics(self):
         snapshot = self._vault_snapshot()

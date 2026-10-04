@@ -1,6 +1,10 @@
 """Test suite for The Assistant backend. Stdlib only."""
 
+import io
 import json
+import math
+import os
+import struct
 import sys
 import tempfile
 import threading
@@ -8,6 +12,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+import wave
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -15,7 +20,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from server import app, config, engine, executor, metrics, skills, vault, vault_cache, vitals  # noqa: E402
+from server import app, config, engine, executor, metrics, skills, vault, vault_cache, vitals, voice  # noqa: E402
 
 
 # ---------- helpers ----------
@@ -57,6 +62,17 @@ class Server:
                 return res.status, json.loads(res.read())
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read() or b"{}")
+
+    def post_raw(self, path, data, content_type="application/octet-stream"):
+        """POST bytes and return the bytes back, for audio either way."""
+        req = urllib.request.Request(
+            self.url(path), data=data, headers={"Content-Type": content_type}, method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as res:
+                return res.status, res.read(), res.headers.get("Content-Type")
+        except urllib.error.HTTPError as e:
+            return e.code, e.read(), e.headers.get("Content-Type")
 
 
 def base_cfg(**over):
@@ -1057,3 +1073,477 @@ class TestExecutionDisabledByDefault(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2, buffer=False)
+
+
+# ---------- voice ----------
+
+# Fake tools, so the voice path is testable without a model on disk.
+# Answers with whisper-style timestamped segments on stdout.
+STT_STDOUT = (
+    "print('[00:00:00.000 --> 00:00:02.400]   capture milk'); "
+    "print('[00:00:02.400 --> 00:00:03.100]   and call mum')"
+)
+# Writes its transcript to the path it is given, instead of stdout.
+STT_TO_FILE = "import sys; open(sys.argv[1], 'w').write('from the output file')"
+# Reads the clip from stdin, proving stdin delivery.
+STT_FROM_STDIN = "import sys; print('stdin bytes', len(sys.stdin.buffer.read()))"
+STT_SILENT = "pass"
+STT_ANGRY = "import sys; sys.stderr.write('model file missing'); sys.exit(3)"
+
+# A 44-byte WAV with no frames: enough to prove audio came back.
+_WAV = (
+    r"b'RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00"
+    r"\x80>\x00\x00\x00}\x00\x00\x02\x00\x10\x00data\x00\x00\x00\x00'"
+)
+# Writes a WAV to the path after -o, else to stdout.
+TTS_WAV = (
+    f"import sys; data = {_WAV}; "
+    "out = [a for a in sys.argv if a.endswith('.wav')]; "
+    "open(out[0], 'wb').write(data) if out else sys.stdout.buffer.write(data)"
+)
+# Records the text it was handed, so a test can prove it arrived verbatim.
+TTS_CAPTURE = (
+    f"import sys; data = {_WAV}; "
+    "open(sys.argv[1], 'w').write(sys.argv[2]); "
+    "open(sys.argv[3], 'wb').write(data)"
+)
+TTS_FROM_STDIN = (
+    f"import sys; data = {_WAV}; "
+    "open(sys.argv[1], 'w').write(sys.stdin.read()); "
+    "sys.stdout.buffer.write(data)"
+)
+
+
+def wav_bytes(seconds=0.5, rate=16000):
+    """A real 16 kHz mono WAV, the shape the HUD uploads."""
+    frames = b"".join(
+        struct.pack("<h", int(8000 * math.sin(i * 0.05)))
+        for i in range(int(rate * seconds))
+    )
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(frames)
+    return buf.getvalue()
+
+
+def stt_cfg(*args, **extra):
+    return {"stt": {"enabled": True, "adapter": "command",
+                    "command": [sys.executable, "-c", *args], **extra}}
+
+
+def tts_cfg(*args, **extra):
+    return {"tts": {"enabled": True, "adapter": "command",
+                    "command": [sys.executable, "-c", *args], **extra}}
+
+
+class TestVoiceHelpers(unittest.TestCase):
+    def test_is_wav_accepts_a_real_recording(self):
+        self.assertTrue(voice.is_wav(wav_bytes(0.1)))
+
+    def test_is_wav_rejects_other_bytes(self):
+        for junk in (b"", b"RIFF", b"not audio at all", b"\x00" * 64, b"RIFFxxxxNOPE"):
+            self.assertFalse(voice.is_wav(junk), repr(junk[:12]))
+
+    def test_whisper_cpp_timestamps_are_stripped(self):
+        text = voice.clean_transcript(
+            "[00:00:00.000 --> 00:00:02.400]   capture milk\n"
+            "[00:00:02.400 --> 00:00:03.100]   and call mum\n"
+        )
+        self.assertEqual(text, "capture milk and call mum")
+
+    def test_short_form_timestamps_are_stripped(self):
+        self.assertEqual(
+            voice.clean_transcript("[00:00.000 --> 00:03.000] plan tomorrow"),
+            "plan tomorrow",
+        )
+
+    def test_timestamps_are_kept_when_asked(self):
+        raw = "[00:00.000 --> 00:03.000] plan tomorrow"
+        self.assertEqual(voice.clean_transcript(raw, strip_timestamps=False), raw)
+
+    def test_bracketed_progress_lines_carry_no_speech(self):
+        text = voice.clean_transcript("[loading model]\n[BLANK_AUDIO]\nreal words\n")
+        self.assertEqual(text, "real words")
+
+    def test_empty_input_is_empty_output(self):
+        self.assertEqual(voice.clean_transcript(""), "")
+        self.assertEqual(voice.clean_transcript(None), "")
+
+
+class TestVoiceBuild(unittest.TestCase):
+    def test_disabled_by_default(self):
+        stt = voice.build_stt({})
+        tts = voice.build_tts({})
+        self.assertEqual((stt.name, stt.available), ("none", False))
+        self.assertEqual((tts.name, tts.available), ("none", False))
+
+    def test_enabled_flag_is_what_decides(self):
+        cfg = {"stt": {"enabled": False, "adapter": "command", "command": ["x"]}}
+        self.assertEqual(voice.build_stt(cfg).name, "none")
+
+    def test_command_adapters(self):
+        self.assertIsInstance(voice.build_stt(stt_cfg("pass")), voice.SttCommand)
+        self.assertIsInstance(voice.build_tts(tts_cfg("pass")), voice.TtsCommand)
+
+    def test_browser_tts_is_not_server_side(self):
+        tts = voice.build_tts({"tts": {"enabled": True, "adapter": "browser"}})
+        self.assertTrue(tts.available)
+        self.assertFalse(tts.server_side)
+        with self.assertRaises(voice.VoiceError):
+            tts.speak("hello")
+
+    def test_unknown_adapter_names_are_refused(self):
+        with self.assertRaises(voice.VoiceError):
+            voice.build_stt({"stt": {"enabled": True, "adapter": "wishful"}})
+        with self.assertRaises(voice.VoiceError):
+            voice.build_tts({"tts": {"enabled": True, "adapter": "wishful"}})
+
+    def test_browser_is_not_an_stt_adapter(self):
+        # Browser speech recognition ships audio to a vendor; it is not an
+        # on-device option, so it is not offered as one.
+        with self.assertRaises(voice.VoiceError):
+            voice.build_stt({"stt": {"enabled": True, "adapter": "browser"}})
+
+    def test_state_reports_mode(self):
+        off = voice.state(voice.SttNone(), voice.TtsNone(), {})
+        self.assertEqual(off["tts"]["mode"], "off")
+        self.assertFalse(off["tts"]["speak_replies"])
+        browser = voice.state(voice.SttNone(), voice.TtsBrowser(), {})
+        self.assertEqual(browser["tts"]["mode"], "browser")
+        server = voice.state(
+            voice.build_stt(stt_cfg("pass")), voice.build_tts(tts_cfg("pass")), {}
+        )
+        self.assertEqual(server["tts"]["mode"], "server")
+        self.assertTrue(server["stt"]["enabled"])
+
+    def test_state_carries_no_command_line(self):
+        # The HUD is told the adapter name, never the local command.
+        payload = json.dumps(
+            voice.state(voice.build_stt(stt_cfg("pass")), voice.build_tts(tts_cfg("pass")), {})
+        )
+        self.assertNotIn(sys.executable, payload)
+
+
+class TestSttCommand(unittest.TestCase):
+    def setUp(self):
+        self.clip = wav_bytes(0.2)
+
+    def test_transcribes_from_a_file_path(self):
+        stt = voice.build_stt(stt_cfg(STT_STDOUT, "{audio}"))
+        self.assertEqual(stt.transcribe(self.clip), "capture milk and call mum")
+
+    def test_transcribes_from_stdin_when_no_audio_token(self):
+        stt = voice.build_stt(stt_cfg(STT_FROM_STDIN))
+        self.assertEqual(stt.transcribe(self.clip), f"stdin bytes {len(self.clip)}")
+
+    def test_output_file_wins_over_stdout(self):
+        stt = voice.build_stt(stt_cfg(STT_TO_FILE, "{output}", "{audio}"))
+        self.assertEqual(stt.transcribe(self.clip), "from the output file")
+
+    def test_non_wav_never_reaches_the_tool(self):
+        stt = voice.build_stt(stt_cfg(STT_STDOUT, "{audio}"))
+        with self.assertRaises(voice.VoiceError) as caught:
+            stt.transcribe(b"this is not audio")
+        self.assertIn("WAV", str(caught.exception))
+
+    def test_unset_command_says_so(self):
+        stt = voice.build_stt({"stt": {"enabled": True, "adapter": "command", "command": []}})
+        with self.assertRaises(voice.VoiceError) as caught:
+            stt.transcribe(self.clip)
+        self.assertIn("voice.stt.command", str(caught.exception))
+
+    def test_missing_binary_is_reported(self):
+        stt = voice.build_stt({"stt": {"enabled": True, "adapter": "command",
+                                       "command": ["./no-such-transcriber"]}})
+        with self.assertRaises(voice.VoiceError) as caught:
+            stt.transcribe(self.clip)
+        self.assertIn("not found", str(caught.exception))
+
+    def test_failure_carries_the_tools_own_words(self):
+        stt = voice.build_stt(stt_cfg(STT_ANGRY, "{audio}"))
+        with self.assertRaises(voice.VoiceError) as caught:
+            stt.transcribe(self.clip)
+        self.assertIn("model file missing", str(caught.exception))
+        self.assertIn("exited 3", str(caught.exception))
+
+    def test_silence_is_not_passed_off_as_speech(self):
+        stt = voice.build_stt(stt_cfg(STT_SILENT, "{audio}"))
+        with self.assertRaises(voice.VoiceError) as caught:
+            stt.transcribe(self.clip)
+        self.assertIn("no speech", str(caught.exception))
+
+    def test_a_slow_tool_times_out(self):
+        stt = voice.build_stt(
+            stt_cfg("import time; time.sleep(5)", "{audio}", timeout_seconds=1)
+        )
+        with self.assertRaises(voice.VoiceError) as caught:
+            stt.transcribe(self.clip)
+        self.assertIn("timed out", str(caught.exception))
+
+    def test_the_clip_is_gone_once_the_run_ends(self):
+        # The recording is a temporary file and must not outlive the call.
+        leaked = []
+        stt = voice.build_stt(stt_cfg("import sys; print(sys.argv[1])", "{audio}"))
+        leaked.append(stt.transcribe(self.clip))
+        self.assertFalse(Path(leaked[0]).exists(), leaked[0])
+
+
+class TestTtsCommand(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.capture = Path(self.tmp.name) / "said.txt"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_speaks_to_an_output_file(self):
+        tts = voice.build_tts(tts_cfg(TTS_WAV, "-o", "{output}", "{text}"))
+        audio, content_type = tts.speak("routed to metrics")
+        self.assertTrue(voice.is_wav(audio))
+        self.assertEqual(content_type, "audio/wav")
+
+    def test_speaks_to_stdout(self):
+        tts = voice.build_tts(tts_cfg(TTS_WAV, "{text}"))
+        audio, _ = tts.speak("routed to metrics")
+        self.assertTrue(voice.is_wav(audio))
+
+    def test_text_goes_on_stdin_when_no_text_token(self):
+        tts = voice.build_tts(tts_cfg(TTS_FROM_STDIN, str(self.capture)))
+        audio, _ = tts.speak("spoken over stdin")
+        self.assertTrue(voice.is_wav(audio))
+        self.assertEqual(self.capture.read_text(), "spoken over stdin")
+
+    def test_text_is_never_shell_interpreted(self):
+        # The reply is attacker-adjacent: it can carry whatever a note or a
+        # model produced. It must arrive as one argument, never as syntax.
+        hostile = 'hi"; rm -rf / #$(whoami)`id`'
+        tts = voice.build_tts(tts_cfg(TTS_CAPTURE, str(self.capture), "{text}", "{output}"))
+        audio, _ = tts.speak(hostile)
+        self.assertTrue(voice.is_wav(audio))
+        self.assertEqual(self.capture.read_text(), hostile)
+
+    def test_blank_text_is_refused(self):
+        tts = voice.build_tts(tts_cfg(TTS_WAV, "{text}"))
+        for blank in ("", "   ", None):
+            with self.assertRaises(voice.VoiceError):
+                tts.speak(blank)
+
+    def test_unset_command_says_so(self):
+        tts = voice.build_tts({"tts": {"enabled": True, "adapter": "command", "command": []}})
+        with self.assertRaises(voice.VoiceError) as caught:
+            tts.speak("hello")
+        self.assertIn("voice.tts.command", str(caught.exception))
+
+    def test_silence_is_not_passed_off_as_speech(self):
+        tts = voice.build_tts(tts_cfg("pass", "{text}"))
+        with self.assertRaises(voice.VoiceError) as caught:
+            tts.speak("hello")
+        self.assertIn("no audio", str(caught.exception))
+
+    def test_failure_carries_the_tools_own_words(self):
+        tts = voice.build_tts(
+            tts_cfg("import sys; sys.stderr.write('no voice model'); sys.exit(2)", "{text}")
+        )
+        with self.assertRaises(voice.VoiceError) as caught:
+            tts.speak("hello")
+        self.assertIn("no voice model", str(caught.exception))
+
+
+# ---------- voice over HTTP ----------
+
+def voice_cfg(**voice_block):
+    cfg = base_cfg()
+    cfg["voice"] = {"stt": {"enabled": False, "adapter": "none"},
+                    "tts": {"enabled": False, "adapter": "none"},
+                    **voice_block}
+    return cfg
+
+
+class TestVoiceHTTP(unittest.TestCase):
+    def setUp(self):
+        self.cfg = voice_cfg(
+            **stt_cfg(STT_STDOUT, "{audio}"),
+            **tts_cfg(TTS_WAV, "-o", "{output}", "{text}"),
+        )
+        self.clip = wav_bytes(0.2)
+
+    def tearDown(self):
+        app.stop_caches()
+
+    def test_state_endpoint_reports_both_directions(self):
+        with Server(self.cfg) as srv:
+            status, body, _ = srv.get("/api/voice")
+            data = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertTrue(data["stt"]["enabled"])
+        self.assertEqual(data["tts"]["mode"], "server")
+
+    def test_state_endpoint_leaks_no_paths(self):
+        with Server(self.cfg) as srv:
+            _, body, _ = srv.get("/api/voice")
+        self.assertNotIn(sys.executable.encode(), body)
+
+    def test_a_recording_comes_back_as_text(self):
+        with Server(self.cfg) as srv:
+            status, body, _ = srv.post_raw("/api/voice/stt", self.clip, "audio/wav")
+        data = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertEqual(data["text"], "capture milk and call mum")
+        self.assertEqual(data["bytes"], len(self.clip))
+        self.assertIn("ms", data)
+
+    def test_non_wav_upload_is_refused(self):
+        with Server(self.cfg) as srv:
+            status, body, _ = srv.post_raw("/api/voice/stt", b"<html>nope</html>", "audio/wav")
+        self.assertEqual(status, 415)
+        self.assertIn("WAV", json.loads(body)["error"])
+
+    def test_empty_upload_is_refused(self):
+        with Server(self.cfg) as srv:
+            status, data = srv.post("/api/voice/stt", b"")
+        self.assertEqual(status, 400)
+        self.assertEqual(data["error"], "no audio received")
+
+    def test_oversized_upload_gets_its_answer_not_a_broken_pipe(self):
+        # The server must read off what the client is still sending before
+        # refusing, or the HUD sees a transport error instead of the 413.
+        too_much = b"RIFF" + b"\x00" * app.MAX_AUDIO_BYTES
+        with Server(self.cfg) as srv:
+            status, body, _ = srv.post_raw("/api/voice/stt", too_much, "audio/wav")
+        self.assertEqual(status, 413)
+        self.assertEqual(json.loads(body)["limit"], app.MAX_AUDIO_BYTES)
+
+    def test_a_failing_transcriber_is_reported_as_a_failure(self):
+        cfg = voice_cfg(**stt_cfg(STT_ANGRY, "{audio}"))
+        with Server(cfg) as srv:
+            status, body, _ = srv.post_raw("/api/voice/stt", self.clip, "audio/wav")
+        self.assertEqual(status, 502)
+        self.assertIn("model file missing", json.loads(body)["error"])
+
+    def test_speak_returns_audio(self):
+        with Server(self.cfg) as srv:
+            status, body, content_type = srv.post_raw(
+                "/api/voice/speak", json.dumps({"text": "routed to metrics"}).encode(),
+                "application/json",
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, "audio/wav")
+        self.assertTrue(voice.is_wav(body))
+
+    def test_speak_needs_something_to_say(self):
+        with Server(self.cfg) as srv:
+            status, data = srv.post("/api/voice/speak", {"text": "   "})
+        self.assertEqual(status, 400)
+
+    def test_health_carries_voice_state(self):
+        with Server(self.cfg) as srv:
+            _, body, _ = srv.get("/api/health")
+        state = json.loads(body)["voice"]
+        self.assertTrue(state["stt"]["enabled"])
+        self.assertEqual(state["tts"]["mode"], "server")
+
+    def test_voice_routes_are_instrumented(self):
+        metrics.reset()
+        with Server(self.cfg) as srv:
+            srv.post_raw("/api/voice/stt", self.clip, "audio/wav")
+            srv.get("/api/voice")
+        routes = metrics.snapshot()["routes"]
+        self.assertIn("/api/voice/stt", routes)
+        self.assertIn("/api/voice", routes)
+
+
+class TestVoiceOffByDefault(unittest.TestCase):
+    def tearDown(self):
+        app.stop_caches()
+
+    def test_shipped_config_keeps_voice_off(self):
+        cfg = config.load()
+        self.assertFalse(cfg["voice"]["stt"]["enabled"])
+        self.assertFalse(cfg["voice"]["tts"]["enabled"])
+
+    def test_state_says_off_rather_than_pretending(self):
+        with Server(voice_cfg()) as srv:
+            _, body, _ = srv.get("/api/voice")
+        data = json.loads(body)
+        self.assertFalse(data["stt"]["enabled"])
+        self.assertEqual(data["tts"]["mode"], "off")
+        self.assertFalse(data["tts"]["speak_replies"])
+
+    def test_transcription_while_off_is_a_clear_refusal(self):
+        with Server(voice_cfg()) as srv:
+            status, body, _ = srv.post_raw("/api/voice/stt", wav_bytes(0.1), "audio/wav")
+        self.assertEqual(status, 409)
+        self.assertIn("not enabled", json.loads(body)["error"])
+
+    def test_speech_while_off_is_a_clear_refusal(self):
+        with Server(voice_cfg()) as srv:
+            status, data = srv.post("/api/voice/speak", {"text": "hello"})
+        self.assertEqual(status, 409)
+        self.assertIn("not enabled", data["error"])
+
+    def test_browser_mode_sends_the_hud_away_empty_handed(self):
+        cfg = voice_cfg(tts={"enabled": True, "adapter": "browser"})
+        with Server(cfg) as srv:
+            status, data = srv.post("/api/voice/speak", {"text": "hello"})
+        self.assertEqual(status, 409)
+        self.assertEqual(data["mode"], "browser")
+
+    def test_a_bad_adapter_name_degrades_instead_of_falling_over(self):
+        # A typo in config must not take the HUD down with it.
+        cfg = voice_cfg(stt={"enabled": True, "adapter": "wishful"})
+        with Server(cfg) as srv:
+            status, body, _ = srv.get("/api/voice")
+            health, health_body, _ = srv.get("/api/health")
+        data = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertEqual(health, 200)
+        self.assertFalse(data["stt"]["enabled"])
+        self.assertIn("wishful", data["error"])
+
+
+class TestVoiceConfig(unittest.TestCase):
+    def setUp(self):
+        self.saved = {k: v for k, v in os.environ.items() if k.startswith("ASSISTANT_")}
+
+    def tearDown(self):
+        for key in [k for k in os.environ if k.startswith("ASSISTANT_")]:
+            del os.environ[key]
+        os.environ.update(self.saved)
+
+    def test_env_turns_transcription_on(self):
+        os.environ["ASSISTANT_STT"] = "1"
+        os.environ["ASSISTANT_STT_ADAPTER"] = "command"
+        os.environ["ASSISTANT_STT_COMMAND"] = "whisper-cli -m model.bin -f {audio} -nt"
+        stt = config.load()["voice"]["stt"]
+        self.assertTrue(stt["enabled"])
+        self.assertEqual(
+            stt["command"], ["whisper-cli", "-m", "model.bin", "-f", "{audio}", "-nt"]
+        )
+
+    def test_quoted_paths_survive_the_split(self):
+        os.environ["ASSISTANT_TTS_COMMAND"] = "piper -m '/models/en US/voice.onnx' -f {output}"
+        self.assertEqual(
+            config.load()["voice"]["tts"]["command"],
+            ["piper", "-m", "/models/en US/voice.onnx", "-f", "{output}"],
+        )
+
+    def test_flags_read_the_usual_spellings(self):
+        for raw, expected in (("1", True), ("true", True), ("ON", True),
+                              ("0", False), ("no", False), ("off", False)):
+            os.environ["ASSISTANT_TTS"] = raw
+            self.assertIs(config.load()["voice"]["tts"]["enabled"], expected, raw)
+
+    def test_replies_can_be_muted_from_the_environment(self):
+        os.environ["ASSISTANT_TTS"] = "1"
+        os.environ["ASSISTANT_TTS_ADAPTER"] = "browser"
+        os.environ["ASSISTANT_TTS_SPEAK_REPLIES"] = "0"
+        self.assertFalse(config.load()["voice"]["tts"]["speak_replies"])
+
+    def test_timeouts_take_only_numbers(self):
+        os.environ["ASSISTANT_STT_TIMEOUT"] = "45"
+        self.assertEqual(config.load()["voice"]["stt"]["timeout_seconds"], 45)
+        os.environ["ASSISTANT_STT_TIMEOUT"] = "soon"
+        self.assertEqual(config.load()["voice"]["stt"]["timeout_seconds"], 120)

@@ -30,6 +30,10 @@ DEFAULTS = {
         "serve_hud": True,
         "allow_origins": [],
     },
+    "voice": {
+        "stt": {"enabled": False, "adapter": "none", "timeout_seconds": 120},
+        "tts": {"enabled": False, "adapter": "none", "timeout_seconds": 60},
+    },
     "paths": {"vault": "vault", "skills": "skills", "hud": "hud"},
     "vault": {"refresh_seconds": 10},
     "schedule": [],
@@ -44,6 +48,34 @@ def _merge(base, override):
             out[key] = _merge(out[key], value)
         else:
             out[key] = value
+    return out
+
+
+def _flag(raw):
+    """Read an environment flag, tolerant of the usual spellings."""
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _override_block(block, prefix, text_keys=(), flag_keys=()):
+    """Apply `<PREFIX>_*` overrides to one adapter settings block."""
+    out = dict(block or {})
+    enabled = os.environ.get(prefix)
+    if enabled is not None and enabled != "":
+        out["enabled"] = _flag(enabled)
+    for key in ("adapter",) + tuple(text_keys):
+        raw = os.environ.get(f"{prefix}_{key.upper()}")
+        if raw:
+            out[key] = raw
+    for key in flag_keys:
+        raw = os.environ.get(f"{prefix}_{key.upper()}")
+        if raw is not None and raw != "":
+            out[key] = _flag(raw)
+    command = os.environ.get(f"{prefix}_COMMAND")
+    if command:
+        out["command"] = shlex.split(command)
+    timeout = os.environ.get(f"{prefix}_TIMEOUT")
+    if timeout and timeout.isdigit():
+        out["timeout_seconds"] = int(timeout)
     return out
 
 
@@ -63,27 +95,19 @@ def _from_env(cfg):
             continue
         cfg[section][key] = int(raw) if key == "port" else raw
 
-    # Execution overrides, so an engine can be tried for one run without
-    # committing it to config.json.
-    execution = dict(cfg["engine"].get("execution") or {})
-    enabled = os.environ.get("ASSISTANT_EXEC")
-    if enabled is not None and enabled != "":
-        execution["enabled"] = enabled.strip().lower() in ("1", "true", "yes", "on")
-    for env_name, key in (
-        ("ASSISTANT_EXEC_ADAPTER", "adapter"),
-        ("ASSISTANT_EXEC_MODEL", "model"),
-        ("ASSISTANT_EXEC_BASE_URL", "base_url"),
-    ):
-        raw = os.environ.get(env_name)
-        if raw:
-            execution[key] = raw
-    command = os.environ.get("ASSISTANT_EXEC_COMMAND")
-    if command:
-        execution["command"] = shlex.split(command)
-    timeout = os.environ.get("ASSISTANT_EXEC_TIMEOUT")
-    if timeout and timeout.isdigit():
-        execution["timeout_seconds"] = int(timeout)
-    cfg["engine"]["execution"] = execution
+    # Execution and voice overrides, so a tool can be tried for a single
+    # run without committing it to config.json.
+    cfg["engine"]["execution"] = _override_block(
+        cfg["engine"].get("execution"), "ASSISTANT_EXEC", ("model", "base_url")
+    )
+    voice = dict(cfg.get("voice") or {})
+    voice["stt"] = _override_block(
+        voice.get("stt"), "ASSISTANT_STT", flag_keys=("strip_timestamps",)
+    )
+    voice["tts"] = _override_block(
+        voice.get("tts"), "ASSISTANT_TTS", flag_keys=("speak_replies",)
+    )
+    cfg["voice"] = voice
     return cfg
 
 
