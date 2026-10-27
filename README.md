@@ -1,4 +1,10 @@
+<div align="center">
+  <img src="assets/brand/github-banner.svg" alt="The Assistant — Local-first assistant platform" width="1200">
+</div>
+
 # The Assistant
+
+[Architecture](#architecture) · [Memory Contract](#memory-contract) · [Status](#status)
 
 A local-first, modular AI assistant platform built around an interchangeable coding-agent layer, Obsidian graph memory, interchangeable Markdown skills, private on-device voice, and a real-time operator HUD—designed to integrate into the OBEOS ecosystem.
 
