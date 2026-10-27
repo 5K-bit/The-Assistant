@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="400" viewBox="0 0 1200 400" role="img" aria-labelledby="title desc">
+<title id="title">The Assistant — Local-first assistant platform</title><desc id="desc">Modular skills. Vault memory. Local voice. A Blackfong project.</desc>
+<defs><pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M32 0H0V32" fill="none" stroke="#ffffff" stroke-opacity=".035"/></pattern></defs>
+<rect width="1200" height="400" rx="18" fill="#0c1220"/><rect width="1200" height="400" rx="18" fill="url(#grid)"/>
+<path d="M48 40h42" stroke="#b5a4ff" stroke-width="5"/>
+<text x="106" y="46" fill="#c5cddb" font-family="Arial, sans-serif" font-size="16" letter-spacing="3">BLACKFONG / PROJECTS</text>
+<text x="48" y="114" fill="#b5a4ff" font-family="Arial, sans-serif" font-size="16" letter-spacing="3">ASSISTANT / 04</text>
+<text x="45" y="194" fill="#f3f5fa" font-family="Arial, sans-serif" font-size="63" font-weight="700" letter-spacing="-2">The Assistant</text>
+<text x="48" y="247" fill="#e0e6ef" font-family="Arial, sans-serif" font-size="25">Local-first assistant platform</text>
+<text x="48" y="285" fill="#99a7bc" font-family="Arial, sans-serif" font-size="21">Modular skills. Vault memory. Local voice.</text>
+<path d="M48 331h1104" stroke="#283345"/>
+<text x="48" y="366" fill="#99a7bc" font-family="Arial, sans-serif" font-size="15" letter-spacing="2">LOCAL SYSTEMS. CLEAR PURPOSE.</text>
+<text x="1106" y="366" fill="#b5a4ff" font-family="Arial, sans-serif" font-size="17" font-weight="700">5K</text>
+<g transform="translate(905 76)" fill="none" stroke="#b5a4ff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"><rect x="30" y="40" width="180" height="140" rx="28"/><path d="m65 180-15 35 60-35M65 110v20m28-40v60m28-80v100m28-80v60m28-40v20"/></g>
+</svg>
