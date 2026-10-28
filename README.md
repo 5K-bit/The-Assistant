@@ -1,10 +1,22 @@
 <div align="center">
-  <img src="assets/brand/github-banner.svg" alt="The Assistant — Local-first assistant platform" width="1200">
+
+<img src="assets/brand/github-banner.svg" alt="The Assistant — Local-first assistant platform. A Blackfong project." width="1200">
+
+**Local-first assistant platform.**
+
+![Stage](https://img.shields.io/badge/stage-Early%20architecture%20v0.1-b5a4ff?style=for-the-badge&labelColor=0c1220)
+
+[Architecture](#architecture) · [Memory](#memory-contract) · [Skills](#skills) · [HUD](#hud) · [Status](#status)
+
 </div>
+
+---
 
 # The Assistant
 
-[Architecture](#architecture) · [Memory Contract](#memory-contract) · [Status](#status)
+| Route | Remember | Interact |
+|---|---|---|
+| Interchangeable coding-agent interface | Obsidian vault and Markdown skills | Local voice direction and operator HUD |
 
 A local-first, modular AI assistant platform built around an interchangeable coding-agent layer, Obsidian graph memory, interchangeable Markdown skills, private on-device voice, and a real-time operator HUD—designed to integrate into the OBEOS ecosystem.
 
