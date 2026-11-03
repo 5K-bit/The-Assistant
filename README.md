@@ -360,3 +360,13 @@ the result lands in the vault and is spoken back.
 Execution and voice both ship **off**, so a fresh clone changes nothing
 until you point them at an engine and a pair of speech tools. With them
 off the HUD says exactly that rather than showing itself armed.
+
+## Licence
+
+Apache-2.0. See [LICENSE](LICENSE).
+
+## AI assistance
+
+AI tools assist with implementation, debugging, tests, and documentation.
+
+Louis Boddie owns project direction and acceptance decisions; linked tests and release evidence document what has been verified.
