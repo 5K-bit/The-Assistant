@@ -30,3 +30,7 @@ vault/.obsidian/workspace-mobile.json
 *.flac
 models/
 cache/
+
+# Browser test dependencies
+tests/ui/node_modules
+tests/ui/package-lock.json

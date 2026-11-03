@@ -205,6 +205,12 @@
   .audio-card .big{font-size:15px;color:var(--green);margin:7px 0 4px}
   .level{display:flex;gap:2px;height:22px;align-items:end}
   .level i{display:block;width:4px;background:var(--green2);opacity:.9}
+  .toggle{
+    border:1px solid var(--line2);background:#0a160e;color:var(--green);
+    font:inherit;font-size:9px;padding:2px 8px;cursor:pointer;letter-spacing:.06em;
+  }
+  .toggle:hover:enabled, .toggle:focus:enabled{outline:none;border-color:var(--green2);background:#0b1810}
+  .toggle:disabled{color:var(--muted);border-color:var(--line);cursor:default}
   .ptt{
     margin-top:8px;border:1px solid var(--green2);padding:9px;text-align:center;
     color:var(--green);font-size:10px;letter-spacing:.08em;background:#08140d;
@@ -228,6 +234,7 @@
     display:grid;grid-template-columns:75px 90px 1fr;gap:7px;
     padding:6px 4px;border-bottom:1px dotted #142c1d;font-size:9px;align-items:start;
   }
+  .feed-row.empty{grid-template-columns:1fr;color:var(--muted)}
   .feed-row .type{color:var(--cyan)}
   .feed-row .path{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .graph{
